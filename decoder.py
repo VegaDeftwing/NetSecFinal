@@ -19,10 +19,17 @@ num_bits = 0
 # decrement from end end of file
 for i in range(wav.shape[0]-1, 0, -1):
     print(wav[i,0])
-    if (wav[i,0] & 0x00000100) > 0:
-        num_bits += 1
+    if type(wav[0,0]) is np.int32:
+        if (wav[i,0] & 0x00000100) > 0:
+            num_bits += 1
+        else:
+            break
     else:
-        break
+        if (wav[i,0] & 1) > 0:
+            num_bits += 1
+        else:
+            break
+
 
 print(num_bits)
 
