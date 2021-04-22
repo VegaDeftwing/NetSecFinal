@@ -36,10 +36,10 @@ secret = np.zeros_like(wav)
 i = 0
 for byte in data:
     for b in range(0,int(8/num_bits)):
+        secret[i,0] = byte & 0b11
         byte = byte >> num_bits
         # print(bin(byte&0b11))
         # TODO mabe & reflective of num_bits
-        secret[i,0] = byte & 0b11
         i += 1
 
 print(f"Secret bit array  = {secret[:, 0]}")
@@ -92,8 +92,8 @@ if type(wav[0,0]) is np.int32:
     # First, we need to make a mask, then bitwise and out the bits we care about
     mask = np.empty_like(wav)
     mask.fill(0xffffffff)
-    mask = np.left_shift(mask,num_bits+8)
-    mask = np.invert(mask)
+    mask = np.left_shift(mask,num_bits+8) # +8 because of the 32 to 24 bit problem, if numbits 2 then 0x
+    mask = np.invert(mask)                # make 
     recovered_bits = np.bitwise_and(wav,mask)
     # [TODO] making this 6 bits right helps
     recovered_bits = np.right_shift(recovered_bits,8)
@@ -132,11 +132,12 @@ for false_byte in recovered_bits:
     # the bytes in recovered bits only contain a few bits, there's a bunch of 0's padding them.
     # this is where those sets of num_bits get turned back into bytes
     j = i%(8/num_bits)
-    recovered_bytes[k,0] += int(false_byte[0]) << int(j*num_bits)
+    recovered_bytes[k,0] += int(false_byte[0]) << int(j*num_bits) #falsebyte[0] because only the left channel
     # If this mess doesn't make sense, uncomment this line and the print in the if below
     print(f"false byte = {np.binary_repr(false_byte[0],width=2)} → recovered byte = {np.binary_repr(recovered_bytes[k,0],width=8)}")
     i+=1
-    if j == 8/num_bits - 1:
+    # if numbits is 2 we want j = 0,1,2,3
+    if j == 8/num_bits -1:
         print("-----")
         k+=1
         i=0
