@@ -3,10 +3,10 @@ from scipy.io import wavfile
 import scipy.io
 import numpy as np
 from rich import print
-import pretty_errors
+#import pretty_errors
 
 # input.wav is 24bit signed pcm, input16 is signed 16 bit, input8 is unsigned 8bit
-input_wav = 'input.wav'
+input_wav = 'input24.wav'
 input_data = 'input.txt'
 # must be 1, 2, 4, or 8
 # [TODO] only 2 works for now, will need to make others work

@@ -3,7 +3,7 @@ from scipy.io import wavfile
 import scipy.io
 import numpy as np
 from rich import print
-import pretty_errors
+#import pretty_errors
 
 input_wav = 'output.wav'
 
@@ -32,6 +32,7 @@ for i in range(wav.shape[0]-1, 0, -1):
 
 
 print(num_bits)
+print("=======================")
 
 
 recovered_bits = np.zeros_like(wav)

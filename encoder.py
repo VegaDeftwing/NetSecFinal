@@ -4,7 +4,7 @@ import scipy.io
 import numpy as np
 import numpy.ma as ma
 from rich import print
-import pretty_errors
+#import pretty_errors
 import soundfile as sf
 # soundfile is needed because while scipy supports reading in 24bit wav, it can't write it
 # and I am super not about to write a custom output method.
@@ -14,7 +14,8 @@ input_wav = 'input24.wav'
 input_data = 'input.txt'
 # must be 1, 2, 4, or 8
 # [TODO] only 2 works for now, will need to make others work
-num_bits = 2
+num_bits = 4
+
 
 assert (num_bits == 1 or num_bits == 2 or num_bits == 4 or num_bits == 8),"num_bits must be 2, 4, or 8"
 
@@ -36,11 +37,27 @@ secret = np.zeros_like(wav)
 # so, need to >> by num bits
 # This will need a try catch to yell at the user if the input file is too big
 # [TODO]
+
+# value = 0b1
+# if num_bits == 2:
+#     value = 0b11
+# elif num_bits == 4:
+#     value = 0b1111
+# else:
+#     value == 0b11111111
+max_bit = 2**num_bits -1
+# try:
+#    file_handler = open(input_wav) 
+#    #file read to get size
+#     file_handler.seek(0,os.SEEK_END)
+#     size = file_handler.tell()
+#     print(f"The size of the file is {size} bytes")
 i = 0
 for byte in data:
     for b in range(0,int(8/num_bits)):
         # TODO mabe & reflective of num_bits
-        secret[i,0] = byte & 0b11
+
+        secret[i,0] = byte & max_bit
         byte = byte >> num_bits
         i += 1
 
