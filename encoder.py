@@ -4,20 +4,17 @@ import scipy.io
 import numpy as np
 import numpy.ma as ma
 from rich import print
-#import pretty_errors
 import soundfile as sf
 # soundfile is needed because while scipy supports reading in 24bit wav, it can't write it
 # and I am super not about to write a custom output method.
 
 # input.wav is 24bit signed pcm, input16 is signed 16 bit, input8 is unsigned 8bit
-input_wav = 'input24.wav'
+# Change these to try different varitions. Yes, it's hardcoded in. 
+input_wav = 'lemons8.wav'
 input_data = 'input.txt'
-# must be 1, 2, 4, or 8
-# [TODO] only 2 works for now, will need to make others work
-num_bits = 4
+num_bits = 1
 
-
-assert (num_bits == 1 or num_bits == 2 or num_bits == 4 or num_bits == 8),"num_bits must be 2, 4, or 8"
+assert (num_bits == 1 or num_bits == 2 or num_bits == 4 or num_bits == 8),"num_bits must be 1, 2, 4, or 8"
 
 # Get the wave file data
 samplerate, wav = wavfile.read(input_wav)
@@ -38,13 +35,6 @@ secret = np.zeros_like(wav)
 # This will need a try catch to yell at the user if the input file is too big
 # [TODO]
 
-# value = 0b1
-# if num_bits == 2:
-#     value = 0b11
-# elif num_bits == 4:
-#     value = 0b1111
-# else:
-#     value == 0b11111111
 max_bit = 2**num_bits -1
 # try:
 #    file_handler = open(input_wav) 
@@ -55,8 +45,6 @@ max_bit = 2**num_bits -1
 i = 0
 for byte in data:
     for b in range(0,int(8/num_bits)):
-        # TODO mabe & reflective of num_bits
-
         secret[i,0] = byte & max_bit
         byte = byte >> num_bits
         i += 1
@@ -107,7 +95,8 @@ else:
 print("end of wav before encoding num_bits: ",end='')
 print(wav[wav.shape[0]-(2+num_bits):wav.shape[0],0])
 
-#TODO this works for 24 bit but seems to fail on everything else... no clue why
+# A check could probably be added here to ensure the data actually
+# fits inside the .wav, but, this is a PoC, so ¯\_(ツ)_/¯
 for i in range(wav.shape[0]-1, wav.shape[0]-(2+num_bits), -1):
     wav[i,0] = wav[i,0] | or_val
     if i==wav.shape[0]-(1+num_bits):
@@ -119,11 +108,12 @@ print(wav[wav.shape[0]-(2+num_bits):wav.shape[0],0])
 print(f"Writing the new .wav file to output.wav")
 
 if type(wav[0,0]) is np.int32:
-    sf.write("output.wav", wav, samplerate, 'PCM_24')
+    sf.write("output24-1.wav", wav, samplerate, 'PCM_24')
 elif type(wav[0,0]) is np.int16:
-    sf.write("output.wav", wav, samplerate, 'PCM_16')
-elif type(wav[0,0]) is np.int8:
-    sf.write("output.wav", wav, samplerate, 'PCM_8')
+    sf.write("output16-1.wav", wav, samplerate, 'PCM_16')
+elif type(wav[0,0]) is np.uint8:
+    # sf.write("output8-2.wav", wav, samplerate, 'PCM_8')
+    wavfile.write("output8-1.wav", samplerate, wav)
 else:
     print("Output file unable to be written ... something about datatypes probably")
 
@@ -169,24 +159,24 @@ else:
     recovered_bits = np.bitwise_and(wav,mask)
     recovered_bits = recovered_bits.astype(np.int8)
 
-# a = 0x61 is 0b00111101 so 0b00 0b11 0b11 0b01 should be 0x0 0x3 0x3 0x1
-# [TODO] I seem to be dropping the last two bits? But I don't think the mask is wrong?
-
 print(f"recovered bits (left)   = {recovered_bits[:, 0]}")
 print(f"recovered bits (right)  = {recovered_bits[:, 1]}")
 
-# trim to only the bits we care about
-# [TODO]
+# Should probably trim to only the bits we care about
+# but, again, this is a PoC, and that would require a lot of work.
 # we wouldn't know this normally, so later, to show a 'real'
 # decoder, we'll need to modify this so that the number of used bits
 # is always in the the last few bytes of the wav file, need to store the
-# num_bits too
+# num_bits too- similalarly to how num_bits is encoded into the end of
+# the wav.
 recovered_bits = recovered_bits[:int((len(data)*(8/num_bits)))]
 
 recovered_bytes = np.zeros_like(recovered_bits)
 
 
 # Yes, I know the following block of code is absolutely disgusting.
+# it's basically just reconstruting the array of num_bits back into
+# an arary of bytes
 
 i = 0
 k = 0

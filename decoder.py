@@ -5,7 +5,7 @@ import numpy as np
 from rich import print
 #import pretty_errors
 
-input_wav = 'output.wav'
+input_wav = 'output8-2.wav'
 
 # Get the wave file data
 samplerate, wav = wavfile.read(input_wav)
