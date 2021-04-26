@@ -5,7 +5,7 @@ import numpy as np
 from rich import print
 #import pretty_errors
 
-input_wav = 'output8-2.wav'
+input_wav = 'output24-8.wav'
 
 # Get the wave file data
 samplerate, wav = wavfile.read(input_wav)
@@ -18,7 +18,6 @@ print(f"raw data (right) = {wav[:, 1]}")
 num_bits = 0
 # decrement from end end of file
 for i in range(wav.shape[0]-1, 0, -1):
-    print(wav[i,0])
     if type(wav[0,0]) is np.int32:
         if (wav[i,0] & 0x00000100) > 0:
             num_bits += 1
@@ -31,8 +30,8 @@ for i in range(wav.shape[0]-1, 0, -1):
             break
 
 
-print(num_bits)
-print("=======================")
+print(f"num_bits = {num_bits} determined by reading binary at end of file")
+print("\n")
 
 
 recovered_bits = np.zeros_like(wav)

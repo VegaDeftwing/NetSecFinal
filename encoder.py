@@ -108,18 +108,17 @@ print(wav[wav.shape[0]-(2+num_bits):wav.shape[0],0])
 print(f"Writing the new .wav file to output.wav")
 
 if type(wav[0,0]) is np.int32:
-    sf.write("output24-1.wav", wav, samplerate, 'PCM_24')
+    sf.write("output24-2.wav", wav, samplerate, 'PCM_24')
 elif type(wav[0,0]) is np.int16:
-    sf.write("output16-1.wav", wav, samplerate, 'PCM_16')
+    sf.write("output16-2.wav", wav, samplerate, 'PCM_16')
 elif type(wav[0,0]) is np.uint8:
-    # sf.write("output8-2.wav", wav, samplerate, 'PCM_8')
     wavfile.write("output8-1.wav", samplerate, wav)
 else:
     print("Output file unable to be written ... something about datatypes probably")
 
 print("Verifying that the written data is not corrupted")
 
-samplerate, wav_check = wavfile.read("output.wav")
+samplerate, wav_check = wavfile.read("output24-2.wav")
 
 if np.array_equal(wav,wav_check):
     print("[bold magenta]Written correctly![/bold magenta]")
