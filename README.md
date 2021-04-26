@@ -61,6 +61,8 @@ Audio used in demo is stolen from the video game 'Portal 2' made by Valve, and i
 
 ---
 
+MIT LICENSE
+
 All source code '.py' files Copyright 2021 Vega Carlson, Noah McCashland.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
@@ -68,3 +70,9 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+---
+
+As an aside, this project was developed pretty rapidly for this class. I wouldn't actually recomend using it to hide files, though the code should serve as a good starting point for something that would- if you actually wanted to do this, you'd probably want to distribute the 'sceret' bytes to conincide with the highest amplitude peaks of the wav, add code for encoding the original data's length into the output wav and where those peaks are. Plus, depending on your use case, make the decoder actually output the original file, not just ASCII. If you want to write even remotely large files, you'd probably need to allow for storage into the right channel as well.
+
+Basically, along with the MIT LICENSE's claim to lack of liability, I'm also just letting you know you shouldn't actually use this for real security. Not that you really should need to anyway? Like, far as I can tell Steganography is really used mostly for hiding illegal content that honestly I hope you get caught if you have. The only good use for it is really artistic in nature, if you're a musician and want to use this to hide some discount code to your discography or something that'd actually be pretty cool. Otherwise, just AES your stuff and don't be a moron, and that's 1000x more secure than this, albeit more obvious ╮(─▽─)╭
