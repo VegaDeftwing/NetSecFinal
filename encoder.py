@@ -10,9 +10,9 @@ import soundfile as sf
 
 # input.wav is 24bit signed pcm, input16 is signed 16 bit, input8 is unsigned 8bit
 # Change these to try different varitions. Yes, it's hardcoded in. 
-input_wav = 'lemons8.wav'
+input_wav = 'lemons24.wav'
 input_data = 'input.txt'
-num_bits = 1
+num_bits = 2
 
 assert (num_bits == 1 or num_bits == 2 or num_bits == 4 or num_bits == 8),"num_bits must be 1, 2, 4, or 8"
 
@@ -146,7 +146,6 @@ if type(wav[0,0]) is np.int32:
     mask = np.left_shift(mask,num_bits+8) # +8 because of the 32 to 24 bit problem, if numbits 2 then 0x
     mask = np.invert(mask)                # make 
     recovered_bits = np.bitwise_and(wav,mask)
-    # [TODO] making this 6 bits right helps
     recovered_bits = np.right_shift(recovered_bits,8)
     recovered_bits = recovered_bits.astype(np.int8)
 else:
@@ -189,7 +188,6 @@ for false_byte in recovered_bits:
     i+=1
     # if numbits is 2 we want j = 0,1,2,3
     if j == 8/num_bits - 1:
-        # print("-----")
         k+=1
         i=0
 
