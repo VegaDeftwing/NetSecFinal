@@ -5,7 +5,7 @@ import numpy as np
 from rich import print
 #import pretty_errors
 
-input_wav = 'output24-8.wav'
+input_wav = 'output24-2.wav'
 
 # Get the wave file data
 samplerate, wav = wavfile.read(input_wav)
@@ -67,7 +67,7 @@ print(f"recovered bits (right)  = {recovered_bits[:, 1]}")
 # store on the end of the file in the encoder, then recovered here in the decoder, we
 # need to do the same for the length of the data. for now, just providing a big enough
 # value to here works, but there's technically overflow.
-recovered_bits = recovered_bits[:300]
+recovered_bits = recovered_bits[:10000]
 
 recovered_bytes = np.zeros_like(recovered_bits)
 

@@ -51,31 +51,33 @@ for byte in data:
 
 print(f"Secret bit array  = {secret[:, 0]}")
 
-print(f"""\nlooking at a single sample and the way we're reading in the
-data, threre might be extra 0's depending on the sample bit depth.
-.wav files are commonly 8, 16, or 24 bit ints or 32bit float.
-We'll avoid floats, so of the int types both 24's are stored
-as int32's in numpy. 
-For this file, samples are {type(wav[0,0])} internally\n""")
 
-if type(wav[0,0]) is np.int32:
-    print("32bit internally, LSB's are off by a byte, secret will be shifted")
-    # First, we need to make room for the bits we're going to write, making them 0 in the
-    # wav file. To do this, first a mask is made, then it's ANDed with the wav
-    mask = np.empty_like(wav)
-    mask.fill(0xffffffff)
-    mask = np.left_shift(mask,num_bits+8)
-    wav = np.bitwise_and(wav,mask)
-    print("doing XOR of secret into file")
-    wav = np.bitwise_xor(wav,(secret<<8))
-else:
-    print(f"{type(wav[0,0])} internally, LSB is correct:")
-    print("doing XOR of secret into file")
-    mask = np.empty_like(wav)
-    mask.fill(0xffffffff)
-    mask = np.left_shift(mask,num_bits)
-    wav = np.bitwise_and(wav,mask)
-    wav = np.bitwise_xor(wav,secret)
+# This code was needed in a priror version. If 32-bit .wav's don't work for you, trying bringing it back in.
+# print(f"""\nlooking at a single sample and the way we're reading in the
+# data, threre might be extra 0's depending on the sample bit depth.
+# .wav files are commonly 8, 16, or 24 bit ints or 32bit float.
+# We'll avoid floats, so of the int types both 24's are stored
+# as int32's in numpy. 
+# For this file, samples are {type(wav[0,0])} internally\n""")
+
+# if type(wav[0,0]) is np.int32:
+#     print("32bit internally, LSB's are off by a byte, secret will be shifted")
+#     # First, we need to make room for the bits we're going to write, making them 0 in the
+#     # wav file. To do this, first a mask is made, then it's ANDed with the wav
+#     mask = np.empty_like(wav)
+#     mask.fill(0xffffffff)
+#     mask = np.left_shift(mask,num_bits+8)
+#     wav = np.bitwise_and(wav,mask)
+#     print("doing XOR of secret into file")
+#     wav = np.bitwise_xor(wav,(secret<<8))
+# else:
+#     print(f"{type(wav[0,0])} internally, LSB is correct:")
+print("doing XOR of secret into file")
+mask = np.empty_like(wav)
+mask.fill(0xffffffff)
+mask = np.left_shift(mask,num_bits)
+wav = np.bitwise_and(wav,mask)
+wav = np.bitwise_xor(wav,secret)
 
 # Now we need to 0-out the bits we want to access.
 
