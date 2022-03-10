@@ -103,23 +103,23 @@ def get_num_bits(wav):
 def recover_bits(wav,num_bits):
     recovered_bits = np.zeros_like(wav)
 
-    if type(wav[0,0]) is np.int32:
-        # First, we need to make a mask, then bitwise and out the bits we care about
-        mask = np.empty_like(wav)
-        mask.fill(0xffffffff)
-        mask = np.left_shift(mask,num_bits+8) # +8 because of the 32 to 24 bit problem, if numbits 2 then 0x
-        mask = np.invert(mask)                # make 
-        recovered_bits = np.bitwise_and(wav,mask)
-        # [TODO] making this 6 bits right helps
-        recovered_bits = np.right_shift(recovered_bits,8)
-        recovered_bits = recovered_bits.astype(np.int8)
-    else:
-        mask = np.empty_like(wav)
-        mask.fill(0xffffffff)
-        mask = np.left_shift(mask,num_bits)
-        mask = np.invert(mask)
-        recovered_bits = np.bitwise_and(wav,mask)
-        recovered_bits = recovered_bits.astype(np.int8)
+    # if type(wav[0,0]) is np.int32:
+    #     # First, we need to make a mask, then bitwise and out the bits we care about
+    #     mask = np.empty_like(wav)
+    #     mask.fill(0xffffffff)
+    #     mask = np.left_shift(mask,num_bits+8) # +8 because of the 32 to 24 bit problem, if numbits 2 then 0x
+    #     mask = np.invert(mask)                # make 
+    #     recovered_bits = np.bitwise_and(wav,mask)
+    #     # [TODO] making this 6 bits right helps
+    #     recovered_bits = np.right_shift(recovered_bits,8)
+    #     recovered_bits = recovered_bits.astype(np.int8)
+    # else:
+    mask = np.empty_like(wav)
+    mask.fill(0xffffffff)
+    mask = np.left_shift(mask,num_bits)
+    mask = np.invert(mask)
+    recovered_bits = np.bitwise_and(wav,mask)
+    recovered_bits = recovered_bits.astype(np.int8)
     return recovered_bits
 
 def recover_bytes(recovered_bits,num_bits):
@@ -144,7 +144,7 @@ def recover_bytes(recovered_bits,num_bits):
             i=0
     return recovered_bytes
 
-
+#--------------------------------------------------------------------------------
 
 input_wav = 'lemons24.wav'
 input_data = 'input.txt'
