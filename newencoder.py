@@ -1,10 +1,12 @@
 #!/bin/python
+from struct import pack
 from scipy.io import wavfile
 import numpy as np
 import numpy.ma as ma
 from rich import print
 import soundfile as sf
-import arrayfire as af
+import bitpack
+import copy
 
 def get_wav_data(input_wav):
     samplerate, wav = wavfile.read(input_wav)
@@ -30,23 +32,18 @@ def secret_data_to_bit_array(data,num_bits,wav_to_clone):
 
     return secret
 
-def secret_data_to_bit_array_af(data,num_bits,wav_to_clone):
-    # afData = af.interop.to_array(wav_to_clone, copy=True)
-    # Make an empty np array, 'secret' the same size and type as the wav array,
-    # and fill it with 0's
-    secret = np.zeros_like(wav_to_clone)
-    anded = af.logical_and(secret,0xffffffff,out=secret)
-    multed = af.multiply(anded,0xffffffff,out=anded)
-    max_bit = 2**num_bits - 1
-    i = 0
-
-    for i in range(0,data.shape[0]*(8//num_bits)):
-        if i%(8//num_bits) == 0:
-            byte = data[(i//(8//num_bits))]
-        secret[i,0] = byte & max_bit
-        byte = byte >> num_bits
-
-    return secret
+def secret_data_to_bit_array_futhark(data,num_bits,wav_to_clone):
+    bp = bitpack.bitpack() # This is the GpGPU futhark object
+    packed = bp.bitpack(data.astype(np.int64)) # Using the bitpack object, pack the data into a bit array
+    # set it back to 32bit ints
+    packed = packed.astype(np.int32)
+    packed = packed.get()
+    # # Get output to be the same size as the input wav:
+    packed.resize(wav_to_clone.shape[0],1,refcheck=False)
+    # packed = np.pad(packed,(0,wav_to_clone.shape[0]-packed.shape[0]),'constant',constant_values=(0,0))
+    packed = np.tile(packed,(1,2))
+    # packed = np.transpose(packed)
+    return packed
 
 
 def secret_data_to_wav(num_bits,wav_to_clone,secret):
@@ -147,7 +144,7 @@ def recover_bytes(recovered_bits,num_bits):
 #--------------------------------------------------------------------------------
 
 input_wav = 'lemons24.wav'
-input_data = 'input.txt'
+input_data = 'inputbig.txt'
 num_bits = 2
 
 assert (num_bits == 1 or num_bits == 2 or num_bits == 4 or num_bits == 8),"num_bits must be 1, 2, 4, or 8"
@@ -160,9 +157,33 @@ print(f"raw data (right) = {wav[:, 1]}")
 secret = get_secret_data(input_data)
 print(f"secret data      = {secret}")
 
-secret_bit_array = secret_data_to_bit_array(secret,num_bits,wav)
+#secret_bit_array = secret_data_to_bit_array(secret,num_bits,wav)
+secret_bit_array_futhark = secret_data_to_bit_array_futhark(secret,num_bits,wav)
 
-secret_wav = secret_data_to_wav(num_bits,wav,secret_bit_array)
+# # print shape of arrays
+# print(f"secret_bit_array = {secret_bit_array.shape}")
+# print(f"secret_bit_array_futhark = {secret_bit_array_futhark.shape}")
+# # print type of arrays
+# print(f"secret_bit_array = {type(secret_bit_array)}")
+# print(f"secret_bit_array_futhark = {type(secret_bit_array_futhark)}")
+# # print numpy data type of each array
+# print(f"secret_bit_array = {secret_bit_array.dtype}")
+# print(f"secret_bit_array_futhark = {secret_bit_array_futhark.dtype}")
+# # print type of the first element in each array
+# print(f"secret_bit_array = {type(secret_bit_array[0,0])}")
+# print(f"secret_bit_array_futhark = {type(secret_bit_array_futhark[0,0])}")
+
+# # print first 20 elemests of each array
+# print(f"secret_bit_array = {secret_bit_array[:20]}")
+# print(f"secret_bit_array_futhark = {secret_bit_array_futhark[:20]}")
+
+# #check if both arrays are the same
+# if(np.array_equal(secret_bit_array,secret_bit_array_futhark)):
+#     print("secret_bit_array and secret_bit_array_futhark are equal")
+# else:
+#     print("secret_bit_array and secret_bit_array_futhark are NOT equal")
+
+secret_wav = secret_data_to_wav(num_bits,wav,secret_bit_array_futhark)
 print(f"Secret has now been XOR'd into the {num_bits} least significant bits")
 print(f"raw data w/ secret (left)  = {wav[:, 0]}")
 print(f"raw data w/ secret (right) = {wav[:, 1]}")

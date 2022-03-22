@@ -1,0 +1,3296 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="326" onload="init(evt)" viewBox="0 0 1200 326" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom();
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				clearzoom();
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		// Fit in full text width
+		if (/^ *$/.test(txt) || t.getSubStringLength(0, txt.length) < w)
+			return;
+
+		for (var x = txt.length - 2; x > 0; x--) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom() {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="326.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="309" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="309" > </text>
+<g id="frames">
+<g >
+<title>/usr/lib/python3.10/site-packages/pytools/__init__.py:1:&lt;module&gt; (2,954 samples, 0.50%)</title><rect x="356.2" y="245" width="5.9" height="15.0" fill="rgb(209,141,32)" rx="2" ry="2" />
+<text  x="359.20" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,512 samples, 0.26%)</title><rect x="236.7" y="165" width="3.0" height="15.0" fill="rgb(232,193,47)" rx="2" ry="2" />
+<text  x="239.69" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (982 samples, 0.17%)</title><rect x="413.1" y="213" width="2.0" height="15.0" fill="rgb(228,195,5)" rx="2" ry="2" />
+<text  x="416.10" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/lib/index_tricks.py:1:&lt;module&gt; (1,989 samples, 0.34%)</title><rect x="268.8" y="245" width="4.0" height="15.0" fill="rgb(207,197,52)" rx="2" ry="2" />
+<text  x="271.81" y="255.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (2,097 samples, 0.35%)</title><rect x="220.6" y="133" width="4.1" height="15.0" fill="rgb(215,112,0)" rx="2" ry="2" />
+<text  x="223.57" y="143.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method pyopencl._cl.get_platforms&gt; (766 samples, 0.13%)</title><rect x="223.2" y="101" width="1.5" height="15.0" fill="rgb(209,193,42)" rx="2" ry="2" />
+<text  x="226.22" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,576 samples, 0.27%)</title><rect x="194.0" y="213" width="3.1" height="15.0" fill="rgb(239,144,31)" rx="2" ry="2" />
+<text  x="196.96" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,033 samples, 0.17%)</title><rect x="112.9" y="181" width="2.1" height="15.0" fill="rgb(234,40,21)" rx="2" ry="2" />
+<text  x="115.91" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.eval&gt; (1,262 samples, 0.21%)</title><rect x="330.4" y="213" width="2.5" height="15.0" fill="rgb(245,224,50)" rx="2" ry="2" />
+<text  x="333.36" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/__init__.py:47:print (1,103 samples, 0.19%)</title><rect x="163.6" y="165" width="2.2" height="15.0" fill="rgb(216,216,3)" rx="2" ry="2" />
+<text  x="166.59" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,253 samples, 0.21%)</title><rect x="95.8" y="213" width="2.5" height="15.0" fill="rgb(238,13,12)" rx="2" ry="2" />
+<text  x="98.75" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (2,311 samples, 0.39%)</title><rect x="439.5" y="213" width="4.6" height="15.0" fill="rgb(238,65,13)" rx="2" ry="2" />
+<text  x="442.54" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/__init__.py:1:&lt;module&gt; (778 samples, 0.13%)</title><rect x="701.4" y="133" width="1.6" height="15.0" fill="rgb(241,108,53)" rx="2" ry="2" />
+<text  x="704.41" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (13,874 samples, 2.34%)</title><rect x="197.1" y="229" width="27.6" height="15.0" fill="rgb(244,95,40)" rx="2" ry="2" />
+<text  x="200.10" y="239.5" >&lt;..</text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/array.py:167:kernel_runner (1,666 samples, 0.28%)</title><rect x="1091.8" y="197" width="3.4" height="15.0" fill="rgb(238,180,48)" rx="2" ry="2" />
+<text  x="1094.83" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (4,125 samples, 0.70%)</title><rect x="521.5" y="229" width="8.2" height="15.0" fill="rgb(232,152,35)" rx="2" ry="2" />
+<text  x="524.49" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,021 samples, 0.17%)</title><rect x="260.3" y="197" width="2.1" height="15.0" fill="rgb(214,87,49)" rx="2" ry="2" />
+<text  x="263.35" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,898 samples, 0.32%)</title><rect x="203.8" y="133" width="3.8" height="15.0" fill="rgb(233,202,9)" rx="2" ry="2" />
+<text  x="206.83" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (76 samples, 0.01%)</title><rect x="459.7" y="165" width="0.2" height="15.0" fill="rgb(213,120,13)" rx="2" ry="2" />
+<text  x="462.74" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/attr/_make.py:1511:wrap (1,383 samples, 0.23%)</title><rect x="123.8" y="229" width="2.7" height="15.0" fill="rgb(230,222,47)" rx="2" ry="2" />
+<text  x="126.77" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/segment.py:327:&lt;genexpr&gt; (353 samples, 0.06%)</title><rect x="630.6" y="85" width="0.7" height="15.0" fill="rgb(238,216,36)" rx="2" ry="2" />
+<text  x="633.56" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (5,218 samples, 0.88%)</title><rect x="332.9" y="229" width="10.4" height="15.0" fill="rgb(242,43,6)" rx="2" ry="2" />
+<text  x="335.88" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/text.py:652:render (839 samples, 0.14%)</title><rect x="635.3" y="149" width="1.7" height="15.0" fill="rgb(246,120,4)" rx="2" ry="2" />
+<text  x="638.32" y="159.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (935 samples, 0.16%)</title><rect x="390.8" y="117" width="1.8" height="15.0" fill="rgb(235,156,38)" rx="2" ry="2" />
+<text  x="393.76" y="127.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (980 samples, 0.17%)</title><rect x="300.7" y="149" width="1.9" height="15.0" fill="rgb(209,50,12)" rx="2" ry="2" />
+<text  x="303.66" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,615 samples, 0.27%)</title><rect x="193.9" y="229" width="3.2" height="15.0" fill="rgb(221,150,35)" rx="2" ry="2" />
+<text  x="196.88" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,732 samples, 0.29%)</title><rect x="106.3" y="229" width="3.4" height="15.0" fill="rgb(209,45,43)" rx="2" ry="2" />
+<text  x="109.28" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,728 samples, 0.46%)</title><rect x="239.7" y="197" width="5.4" height="15.0" fill="rgb(230,140,44)" rx="2" ry="2" />
+<text  x="242.71" y="207.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:1:&lt;module&gt; (10,256 samples, 1.73%)</title><rect x="64.7" y="245" width="20.5" height="15.0" fill="rgb(253,71,45)" rx="2" ry="2" />
+<text  x="67.73" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,603 samples, 0.27%)</title><rect x="230.5" y="165" width="3.2" height="15.0" fill="rgb(217,152,2)" rx="2" ry="2" />
+<text  x="233.46" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (711 samples, 0.12%)</title><rect x="371.5" y="197" width="1.4" height="15.0" fill="rgb(217,187,33)" rx="2" ry="2" />
+<text  x="374.47" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/theme.py:1:&lt;module&gt; (1,274 samples, 0.22%)</title><rect x="444.1" y="245" width="2.6" height="15.0" fill="rgb(242,158,25)" rx="2" ry="2" />
+<text  x="447.14" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (884 samples, 0.15%)</title><rect x="272.8" y="213" width="1.8" height="15.0" fill="rgb(239,16,48)" rx="2" ry="2" />
+<text  x="275.80" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (592,133 samples, 100.00%)</title><rect x="10.0" y="261" width="1180.0" height="15.0" fill="rgb(215,225,29)" rx="2" ry="2" />
+<text  x="13.00" y="271.5" >~:0:&lt;built-in method builtins.exec&gt;</text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,047 samples, 0.18%)</title><rect x="681.4" y="149" width="2.0" height="15.0" fill="rgb(242,199,25)" rx="2" ry="2" />
+<text  x="684.35" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/matrixlib/defmatrix.py:1:&lt;module&gt; (980 samples, 0.17%)</title><rect x="283.7" y="245" width="1.9" height="15.0" fill="rgb(212,156,41)" rx="2" ry="2" />
+<text  x="286.65" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (753 samples, 0.13%)</title><rect x="445.2" y="197" width="1.5" height="15.0" fill="rgb(242,109,51)" rx="2" ry="2" />
+<text  x="448.18" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (749 samples, 0.13%)</title><rect x="701.5" y="101" width="1.5" height="15.0" fill="rgb(225,19,12)" rx="2" ry="2" />
+<text  x="704.47" y="111.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,084 samples, 0.18%)</title><rect x="265.3" y="149" width="2.1" height="15.0" fill="rgb(227,204,43)" rx="2" ry="2" />
+<text  x="268.26" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (5,195 samples, 0.88%)</title><rect x="458.7" y="197" width="10.3" height="15.0" fill="rgb(221,125,53)" rx="2" ry="2" />
+<text  x="461.66" y="207.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:693:__exit__ (933 samples, 0.16%)</title><rect x="178.2" y="133" width="1.8" height="15.0" fill="rgb(242,131,0)" rx="2" ry="2" />
+<text  x="181.19" y="143.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (909 samples, 0.15%)</title><rect x="390.8" y="101" width="1.8" height="15.0" fill="rgb(231,209,22)" rx="2" ry="2" />
+<text  x="393.82" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,399 samples, 0.24%)</title><rect x="563.4" y="165" width="2.8" height="15.0" fill="rgb(228,126,54)" rx="2" ry="2" />
+<text  x="566.39" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (688 samples, 0.12%)</title><rect x="437.2" y="181" width="1.3" height="15.0" fill="rgb(223,172,8)" rx="2" ry="2" />
+<text  x="440.17" y="191.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,200 samples, 0.20%)</title><rect x="515.8" y="133" width="2.4" height="15.0" fill="rgb(223,190,37)" rx="2" ry="2" />
+<text  x="518.84" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (820 samples, 0.14%)</title><rect x="218.8" y="149" width="1.6" height="15.0" fill="rgb(235,176,1)" rx="2" ry="2" />
+<text  x="221.76" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,820 samples, 0.31%)</title><rect x="115.0" y="197" width="3.6" height="15.0" fill="rgb(208,179,19)" rx="2" ry="2" />
+<text  x="117.97" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,363 samples, 0.23%)</title><rect x="254.8" y="165" width="2.7" height="15.0" fill="rgb(208,47,34)" rx="2" ry="2" />
+<text  x="257.83" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/matlab/_mio4.py:1:&lt;module&gt; (3,983 samples, 0.67%)</title><rect x="558.2" y="245" width="8.0" height="15.0" fill="rgb(219,227,29)" rx="2" ry="2" />
+<text  x="561.24" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/array.py:1:&lt;module&gt; (1,292 samples, 0.22%)</title><rect x="322.1" y="245" width="2.6" height="15.0" fill="rgb(221,9,18)" rx="2" ry="2" />
+<text  x="325.12" y="255.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (4,575 samples, 0.77%)</title><rect x="459.9" y="181" width="9.1" height="15.0" fill="rgb(251,148,1)" rx="2" ry="2" />
+<text  x="462.90" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (3,773 samples, 0.64%)</title><rect x="287.7" y="229" width="7.6" height="15.0" fill="rgb(251,218,29)" rx="2" ry="2" />
+<text  x="290.75" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,192 samples, 0.20%)</title><rect x="322.3" y="229" width="2.4" height="15.0" fill="rgb(206,115,15)" rx="2" ry="2" />
+<text  x="325.32" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (4,694 samples, 0.79%)</title><rect x="548.9" y="213" width="9.3" height="15.0" fill="rgb(249,225,0)" rx="2" ry="2" />
+<text  x="551.89" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (2,885 samples, 0.49%)</title><rect x="138.2" y="117" width="5.7" height="15.0" fill="rgb(245,110,22)" rx="2" ry="2" />
+<text  x="141.19" y="127.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/compat/py3k.py:1:&lt;module&gt; (2,746 samples, 0.46%)</title><rect x="188.2" y="245" width="5.5" height="15.0" fill="rgb(210,57,49)" rx="2" ry="2" />
+<text  x="191.22" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (3,367 samples, 0.57%)</title><rect x="446.9" y="213" width="6.7" height="15.0" fill="rgb(236,24,39)" rx="2" ry="2" />
+<text  x="449.87" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (3,036 samples, 0.51%)</title><rect x="496.5" y="197" width="6.1" height="15.0" fill="rgb(242,218,47)" rx="2" ry="2" />
+<text  x="499.55" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/__init__.py:459:__getattr__ (1,982 samples, 0.33%)</title><rect x="1086.4" y="197" width="3.9" height="15.0" fill="rgb(249,12,53)" rx="2" ry="2" />
+<text  x="1089.35" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,782 samples, 0.30%)</title><rect x="544.8" y="165" width="3.6" height="15.0" fill="rgb(215,218,3)" rx="2" ry="2" />
+<text  x="547.80" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (3,464 samples, 0.59%)</title><rect x="484.2" y="133" width="6.9" height="15.0" fill="rgb(231,108,50)" rx="2" ry="2" />
+<text  x="487.15" y="143.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,256 samples, 0.21%)</title><rect x="527.2" y="181" width="2.5" height="15.0" fill="rgb(228,6,24)" rx="2" ry="2" />
+<text  x="530.21" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (3,747 samples, 0.63%)</title><rect x="287.8" y="213" width="7.5" height="15.0" fill="rgb(205,101,10)" rx="2" ry="2" />
+<text  x="290.80" y="223.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (703 samples, 0.12%)</title><rect x="316.8" y="117" width="1.4" height="15.0" fill="rgb(238,65,36)" rx="2" ry="2" />
+<text  x="319.82" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (9,891 samples, 1.67%)</title><rect x="65.5" y="213" width="19.7" height="15.0" fill="rgb(250,192,11)" rx="2" ry="2" />
+<text  x="68.46" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,865 samples, 0.31%)</title><rect x="449.9" y="181" width="3.7" height="15.0" fill="rgb(215,167,31)" rx="2" ry="2" />
+<text  x="452.87" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (858 samples, 0.14%)</title><rect x="145.9" y="117" width="1.7" height="15.0" fill="rgb(222,203,26)" rx="2" ry="2" />
+<text  x="148.86" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (804 samples, 0.14%)</title><rect x="373.8" y="229" width="1.6" height="15.0" fill="rgb(224,23,47)" rx="2" ry="2" />
+<text  x="376.82" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,209 samples, 0.20%)</title><rect x="398.4" y="181" width="2.4" height="15.0" fill="rgb(250,88,48)" rx="2" ry="2" />
+<text  x="401.37" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (979 samples, 0.17%)</title><rect x="182.9" y="197" width="1.9" height="15.0" fill="rgb(246,221,16)" rx="2" ry="2" />
+<text  x="185.85" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (783 samples, 0.13%)</title><rect x="289.3" y="149" width="1.5" height="15.0" fill="rgb(241,16,54)" rx="2" ry="2" />
+<text  x="292.28" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:670:_compile_bytecode (2,811 samples, 0.47%)</title><rect x="709.0" y="149" width="5.6" height="15.0" fill="rgb(218,164,53)" rx="2" ry="2" />
+<text  x="712.03" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (5,445 samples, 0.92%)</title><rect x="384.2" y="181" width="10.9" height="15.0" fill="rgb(235,22,54)" rx="2" ry="2" />
+<text  x="387.24" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (3,678 samples, 0.62%)</title><rect x="295.3" y="229" width="7.3" height="15.0" fill="rgb(244,20,34)" rx="2" ry="2" />
+<text  x="298.28" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (787 samples, 0.13%)</title><rect x="409.1" y="165" width="1.6" height="15.0" fill="rgb(229,55,50)" rx="2" ry="2" />
+<text  x="412.10" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,767 samples, 0.30%)</title><rect x="576.3" y="213" width="3.5" height="15.0" fill="rgb(229,103,50)" rx="2" ry="2" />
+<text  x="579.26" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,159 samples, 0.20%)</title><rect x="559.5" y="197" width="2.3" height="15.0" fill="rgb(242,217,47)" rx="2" ry="2" />
+<text  x="562.50" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,231 samples, 0.21%)</title><rect x="288.4" y="165" width="2.4" height="15.0" fill="rgb(252,47,11)" rx="2" ry="2" />
+<text  x="291.39" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (931 samples, 0.16%)</title><rect x="318.2" y="165" width="1.9" height="15.0" fill="rgb(246,200,33)" rx="2" ry="2" />
+<text  x="321.22" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,217 samples, 0.21%)</title><rect x="1087.9" y="133" width="2.4" height="15.0" fill="rgb(208,38,5)" rx="2" ry="2" />
+<text  x="1090.88" y="143.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (845 samples, 0.14%)</title><rect x="341.6" y="133" width="1.7" height="15.0" fill="rgb(223,124,54)" rx="2" ry="2" />
+<text  x="344.59" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/text.py:784:truncate (2,033 samples, 0.34%)</title><rect x="631.3" y="133" width="4.0" height="15.0" fill="rgb(246,0,51)" rx="2" ry="2" />
+<text  x="634.26" y="143.5" ></text>
+</g>
+<g >
+<title>newencoder.py:122:recover_bytes (16,476 samples, 2.78%)</title><rect x="733.7" y="229" width="32.8" height="15.0" fill="rgb(217,201,11)" rx="2" ry="2" />
+<text  x="736.67" y="239.5" >ne..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,367 samples, 0.23%)</title><rect x="431.9" y="213" width="2.7" height="15.0" fill="rgb(248,23,27)" rx="2" ry="2" />
+<text  x="434.87" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,856 samples, 0.31%)</title><rect x="339.6" y="165" width="3.7" height="15.0" fill="rgb(240,108,22)" rx="2" ry="2" />
+<text  x="342.58" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (757 samples, 0.13%)</title><rect x="433.1" y="181" width="1.5" height="15.0" fill="rgb(229,89,36)" rx="2" ry="2" />
+<text  x="436.09" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,701 samples, 0.29%)</title><rect x="190.3" y="197" width="3.4" height="15.0" fill="rgb(227,177,43)" rx="2" ry="2" />
+<text  x="193.30" y="207.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (16,299 samples, 2.75%)</title><rect x="147.6" y="197" width="32.4" height="15.0" fill="rgb(247,2,42)" rx="2" ry="2" />
+<text  x="150.57" y="207.5" >~:..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (5,733 samples, 0.97%)</title><rect x="715.8" y="181" width="11.4" height="15.0" fill="rgb(248,94,16)" rx="2" ry="2" />
+<text  x="718.81" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (1,172 samples, 0.20%)</title><rect x="82.8" y="165" width="2.4" height="15.0" fill="rgb(207,105,30)" rx="2" ry="2" />
+<text  x="85.84" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,191 samples, 0.20%)</title><rect x="103.9" y="197" width="2.3" height="15.0" fill="rgb(248,64,2)" rx="2" ry="2" />
+<text  x="106.85" y="207.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:263:write (44,402 samples, 7.50%)</title><rect x="1101.5" y="213" width="88.5" height="15.0" fill="rgb(226,42,25)" rx="2" ry="2" />
+<text  x="1104.52" y="223.5" >/home/vega..</text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (4,604 samples, 0.78%)</title><rect x="664.0" y="181" width="9.2" height="15.0" fill="rgb(224,148,21)" rx="2" ry="2" />
+<text  x="666.99" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,821 samples, 0.31%)</title><rect x="562.6" y="181" width="3.6" height="15.0" fill="rgb(253,176,49)" rx="2" ry="2" />
+<text  x="565.55" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (4,075 samples, 0.69%)</title><rect x="259.3" y="229" width="8.1" height="15.0" fill="rgb(220,47,17)" rx="2" ry="2" />
+<text  x="262.30" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method posix.stat&gt; (1,119 samples, 0.19%)</title><rect x="500.4" y="117" width="2.2" height="15.0" fill="rgb(230,224,54)" rx="2" ry="2" />
+<text  x="503.37" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,291 samples, 0.39%)</title><rect x="203.0" y="149" width="4.6" height="15.0" fill="rgb(217,57,52)" rx="2" ry="2" />
+<text  x="206.04" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/re.py:249:compile (1,364 samples, 0.23%)</title><rect x="99.7" y="229" width="2.7" height="15.0" fill="rgb(214,177,34)" rx="2" ry="2" />
+<text  x="102.69" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (1,237 samples, 0.21%)</title><rect x="395.3" y="181" width="2.5" height="15.0" fill="rgb(206,31,18)" rx="2" ry="2" />
+<text  x="398.35" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (60 samples, 0.01%)</title><rect x="385.2" y="133" width="0.1" height="15.0" fill="rgb(241,42,54)" rx="2" ry="2" />
+<text  x="388.17" y="143.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method marshal.loads&gt; (798 samples, 0.13%)</title><rect x="652.6" y="117" width="1.6" height="15.0" fill="rgb(218,144,54)" rx="2" ry="2" />
+<text  x="655.63" y="127.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (912 samples, 0.15%)</title><rect x="335.7" y="181" width="1.8" height="15.0" fill="rgb(216,156,5)" rx="2" ry="2" />
+<text  x="338.66" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,331 samples, 0.22%)</title><rect x="120.9" y="213" width="2.6" height="15.0" fill="rgb(246,37,48)" rx="2" ry="2" />
+<text  x="123.90" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/sparse/__init__.py:1:&lt;module&gt; (4,492 samples, 0.76%)</title><rect x="570.8" y="245" width="9.0" height="15.0" fill="rgb(246,140,45)" rx="2" ry="2" />
+<text  x="573.83" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,629 samples, 0.28%)</title><rect x="582.9" y="229" width="3.3" height="15.0" fill="rgb(243,64,27)" rx="2" ry="2" />
+<text  x="585.93" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,398 samples, 0.24%)</title><rect x="431.8" y="229" width="2.8" height="15.0" fill="rgb(213,126,5)" rx="2" ry="2" />
+<text  x="434.81" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (694 samples, 0.12%)</title><rect x="96.9" y="181" width="1.4" height="15.0" fill="rgb(207,146,12)" rx="2" ry="2" />
+<text  x="99.87" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (3,558 samples, 0.60%)</title><rect x="226.6" y="229" width="7.1" height="15.0" fill="rgb(210,184,15)" rx="2" ry="2" />
+<text  x="229.56" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/cells.py:26:&lt;genexpr&gt; (1,400 samples, 0.24%)</title><rect x="613.9" y="149" width="2.8" height="15.0" fill="rgb(228,148,33)" rx="2" ry="2" />
+<text  x="616.93" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,109 samples, 0.19%)</title><rect x="359.9" y="181" width="2.2" height="15.0" fill="rgb(249,210,3)" rx="2" ry="2" />
+<text  x="362.87" y="191.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (2,123 samples, 0.36%)</title><rect x="220.5" y="149" width="4.2" height="15.0" fill="rgb(211,128,47)" rx="2" ry="2" />
+<text  x="223.51" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,005 samples, 0.17%)</title><rect x="413.1" y="229" width="2.0" height="15.0" fill="rgb(210,147,36)" rx="2" ry="2" />
+<text  x="416.05" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (1,680 samples, 0.28%)</title><rect x="654.6" y="149" width="3.3" height="15.0" fill="rgb(231,47,7)" rx="2" ry="2" />
+<text  x="657.60" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/cells.py:12:cell_len (318 samples, 0.05%)</title><rect x="630.6" y="53" width="0.7" height="15.0" fill="rgb(249,119,47)" rx="2" ry="2" />
+<text  x="633.63" y="63.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,470 samples, 0.25%)</title><rect x="508.6" y="197" width="3.0" height="15.0" fill="rgb(247,119,50)" rx="2" ry="2" />
+<text  x="511.62" y="207.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:1137:flush (932 samples, 0.16%)</title><rect x="178.2" y="101" width="1.8" height="15.0" fill="rgb(231,168,17)" rx="2" ry="2" />
+<text  x="181.19" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,037 samples, 0.18%)</title><rect x="104.2" y="181" width="2.0" height="15.0" fill="rgb(210,161,22)" rx="2" ry="2" />
+<text  x="107.16" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,383 samples, 0.23%)</title><rect x="573.5" y="181" width="2.7" height="15.0" fill="rgb(215,10,48)" rx="2" ry="2" />
+<text  x="576.46" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (841 samples, 0.14%)</title><rect x="551.2" y="181" width="1.7" height="15.0" fill="rgb(222,177,12)" rx="2" ry="2" />
+<text  x="554.22" y="191.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (1,162 samples, 0.20%)</title><rect x="466.7" y="149" width="2.3" height="15.0" fill="rgb(235,151,34)" rx="2" ry="2" />
+<text  x="469.70" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (1,871 samples, 0.32%)</title><rect x="654.2" y="181" width="3.7" height="15.0" fill="rgb(235,167,37)" rx="2" ry="2" />
+<text  x="657.22" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/console.py:1558:print (22,922 samples, 3.87%)</title><rect x="591.3" y="213" width="45.7" height="15.0" fill="rgb(239,83,38)" rx="2" ry="2" />
+<text  x="594.31" y="223.5" >/usr..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,173 samples, 0.20%)</title><rect x="270.4" y="197" width="2.4" height="15.0" fill="rgb(227,57,32)" rx="2" ry="2" />
+<text  x="273.43" y="207.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (1,558 samples, 0.26%)</title><rect x="236.6" y="197" width="3.1" height="15.0" fill="rgb(229,209,20)" rx="2" ry="2" />
+<text  x="239.60" y="207.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (55 samples, 0.01%)</title><rect x="312.6" y="149" width="0.1" height="15.0" fill="rgb(210,84,41)" rx="2" ry="2" />
+<text  x="315.60" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/shutil.py:1:&lt;module&gt; (842 samples, 0.14%)</title><rect x="109.7" y="245" width="1.7" height="15.0" fill="rgb(254,72,36)" rx="2" ry="2" />
+<text  x="112.73" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/compyte/dtypes.py:43:get_or_register_dtype (2,483 samples, 0.42%)</title><rect x="325.4" y="213" width="5.0" height="15.0" fill="rgb(248,60,38)" rx="2" ry="2" />
+<text  x="328.42" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1182:exec_module (1,785 samples, 0.30%)</title><rect x="679.9" y="181" width="3.5" height="15.0" fill="rgb(239,150,49)" rx="2" ry="2" />
+<text  x="682.88" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (754 samples, 0.13%)</title><rect x="701.5" y="117" width="1.5" height="15.0" fill="rgb(222,85,24)" rx="2" ry="2" />
+<text  x="704.46" y="127.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,714 samples, 0.29%)</title><rect x="184.8" y="197" width="3.4" height="15.0" fill="rgb(220,176,24)" rx="2" ry="2" />
+<text  x="187.80" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (2,229 samples, 0.38%)</title><rect x="553.8" y="181" width="4.4" height="15.0" fill="rgb(217,219,20)" rx="2" ry="2" />
+<text  x="556.80" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,352 samples, 0.23%)</title><rect x="302.7" y="213" width="2.7" height="15.0" fill="rgb(244,115,29)" rx="2" ry="2" />
+<text  x="305.70" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (2,868 samples, 0.48%)</title><rect x="364.8" y="213" width="5.7" height="15.0" fill="rgb(237,169,37)" rx="2" ry="2" />
+<text  x="367.77" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/matlab/__init__.py:1:&lt;module&gt; (5,587 samples, 0.94%)</title><rect x="537.2" y="245" width="11.2" height="15.0" fill="rgb(229,56,26)" rx="2" ry="2" />
+<text  x="540.22" y="255.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method pyopencl._cl.get_platforms&gt; (58,543 samples, 9.89%)</title><rect x="965.7" y="165" width="116.7" height="15.0" fill="rgb(224,161,38)" rx="2" ry="2" />
+<text  x="968.71" y="175.5" >~:0:&lt;built-in ..</text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (673 samples, 0.11%)</title><rect x="428.1" y="149" width="1.4" height="15.0" fill="rgb(230,208,29)" rx="2" ry="2" />
+<text  x="431.13" y="159.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (4,338 samples, 0.73%)</title><rect x="169.1" y="165" width="8.6" height="15.0" fill="rgb(218,51,17)" rx="2" ry="2" />
+<text  x="172.10" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/json/__init__.py:1:&lt;module&gt; (1,034 samples, 0.17%)</title><rect x="89.0" y="245" width="2.1" height="15.0" fill="rgb(227,65,13)" rx="2" ry="2" />
+<text  x="92.02" y="255.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,294 samples, 0.22%)</title><rect x="509.0" y="181" width="2.6" height="15.0" fill="rgb(206,65,53)" rx="2" ry="2" />
+<text  x="511.97" y="191.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (746 samples, 0.13%)</title><rect x="135.1" y="117" width="1.5" height="15.0" fill="rgb(253,211,16)" rx="2" ry="2" />
+<text  x="138.11" y="127.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:263:write (1,154 samples, 0.19%)</title><rect x="177.7" y="149" width="2.3" height="15.0" fill="rgb(246,66,54)" rx="2" ry="2" />
+<text  x="180.75" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,036 samples, 0.17%)</title><rect x="167.0" y="133" width="2.1" height="15.0" fill="rgb(213,148,30)" rx="2" ry="2" />
+<text  x="170.04" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,136 samples, 0.19%)</title><rect x="427.2" y="165" width="2.3" height="15.0" fill="rgb(244,202,29)" rx="2" ry="2" />
+<text  x="430.21" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/style.py:1:&lt;module&gt; (1,654 samples, 0.28%)</title><rect x="431.3" y="245" width="3.3" height="15.0" fill="rgb(220,108,34)" rx="2" ry="2" />
+<text  x="434.30" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,118 samples, 0.19%)</title><rect x="370.7" y="213" width="2.2" height="15.0" fill="rgb(247,7,14)" rx="2" ry="2" />
+<text  x="373.66" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (840 samples, 0.14%)</title><rect x="349.2" y="181" width="1.7" height="15.0" fill="rgb(253,157,18)" rx="2" ry="2" />
+<text  x="352.18" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (5,147 samples, 0.87%)</title><rect x="717.0" y="149" width="10.2" height="15.0" fill="rgb(232,125,0)" rx="2" ry="2" />
+<text  x="719.97" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (737 samples, 0.12%)</title><rect x="365.4" y="197" width="1.5" height="15.0" fill="rgb(243,142,18)" rx="2" ry="2" />
+<text  x="368.38" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (778 samples, 0.13%)</title><rect x="519.9" y="181" width="1.6" height="15.0" fill="rgb(252,202,47)" rx="2" ry="2" />
+<text  x="522.94" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (3,428 samples, 0.58%)</title><rect x="512.9" y="181" width="6.9" height="15.0" fill="rgb(224,129,6)" rx="2" ry="2" />
+<text  x="515.95" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,426 samples, 0.41%)</title><rect x="524.9" y="197" width="4.8" height="15.0" fill="rgb(242,90,11)" rx="2" ry="2" />
+<text  x="527.87" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/cells.py:12:cell_len (4,932 samples, 0.83%)</title><rect x="621.4" y="117" width="9.9" height="15.0" fill="rgb(243,77,34)" rx="2" ry="2" />
+<text  x="624.44" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (750 samples, 0.13%)</title><rect x="167.6" y="101" width="1.5" height="15.0" fill="rgb(223,80,39)" rx="2" ry="2" />
+<text  x="170.61" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (2,568 samples, 0.43%)</title><rect x="571.1" y="229" width="5.1" height="15.0" fill="rgb(237,14,42)" rx="2" ry="2" />
+<text  x="574.10" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (778 samples, 0.13%)</title><rect x="146.0" y="101" width="1.6" height="15.0" fill="rgb(236,186,16)" rx="2" ry="2" />
+<text  x="149.02" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,162 samples, 0.20%)</title><rect x="322.4" y="213" width="2.3" height="15.0" fill="rgb(209,197,33)" rx="2" ry="2" />
+<text  x="325.38" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/tools.py:76:first_arg_dependent_memoize (1,545 samples, 0.26%)</title><rect x="1092.1" y="149" width="3.1" height="15.0" fill="rgb(251,88,28)" rx="2" ry="2" />
+<text  x="1095.07" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (658 samples, 0.11%)</title><rect x="234.4" y="213" width="1.3" height="15.0" fill="rgb(209,101,49)" rx="2" ry="2" />
+<text  x="237.36" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_dtype.py:263:_struct_list_str (2,000 samples, 0.34%)</title><rect x="326.4" y="165" width="4.0" height="15.0" fill="rgb(236,125,53)" rx="2" ry="2" />
+<text  x="329.38" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (4,184 samples, 0.71%)</title><rect x="384.3" y="165" width="8.3" height="15.0" fill="rgb(242,140,9)" rx="2" ry="2" />
+<text  x="387.29" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (808 samples, 0.14%)</title><rect x="581.2" y="229" width="1.6" height="15.0" fill="rgb(250,192,15)" rx="2" ry="2" />
+<text  x="584.20" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (3,936 samples, 0.66%)</title><rect x="558.3" y="229" width="7.9" height="15.0" fill="rgb(230,75,32)" rx="2" ry="2" />
+<text  x="561.34" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_parse.py:435:_parse_sub (766 samples, 0.13%)</title><rect x="100.9" y="165" width="1.5" height="15.0" fill="rgb(207,225,42)" rx="2" ry="2" />
+<text  x="103.88" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/sparse/csgraph/__init__.py:1:&lt;module&gt; (822 samples, 0.14%)</title><rect x="581.2" y="245" width="1.6" height="15.0" fill="rgb(206,3,1)" rx="2" ry="2" />
+<text  x="584.18" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/linalg/linalg.py:1:&lt;module&gt; (736 samples, 0.12%)</title><rect x="274.6" y="245" width="1.4" height="15.0" fill="rgb(249,56,35)" rx="2" ry="2" />
+<text  x="277.56" y="255.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (187 samples, 0.03%)</title><rect x="663.6" y="181" width="0.4" height="15.0" fill="rgb(220,155,37)" rx="2" ry="2" />
+<text  x="666.62" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method pyopencl._cl.get_platforms&gt; (730 samples, 0.12%)</title><rect x="489.6" y="53" width="1.5" height="15.0" fill="rgb(232,192,1)" rx="2" ry="2" />
+<text  x="492.60" y="63.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/default_styles.py:1:&lt;module&gt; (2,032 samples, 0.34%)</title><rect x="406.6" y="245" width="4.1" height="15.0" fill="rgb(208,140,15)" rx="2" ry="2" />
+<text  x="409.62" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/random/_pickle.py:1:&lt;module&gt; (3,688 samples, 0.62%)</title><rect x="295.3" y="245" width="7.3" height="15.0" fill="rgb(208,130,21)" rx="2" ry="2" />
+<text  x="298.26" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/highlighter.py:20:__call__ (8,554 samples, 1.44%)</title><rect x="595.6" y="165" width="17.0" height="15.0" fill="rgb(212,99,3)" rx="2" ry="2" />
+<text  x="598.60" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (56 samples, 0.01%)</title><rect x="638.7" y="165" width="0.1" height="15.0" fill="rgb(209,224,3)" rx="2" ry="2" />
+<text  x="641.66" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (4,171 samples, 0.70%)</title><rect x="199.3" y="197" width="8.3" height="15.0" fill="rgb(222,19,31)" rx="2" ry="2" />
+<text  x="202.30" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (25,936 samples, 4.38%)</title><rect x="128.4" y="229" width="51.6" height="15.0" fill="rgb(229,6,17)" rx="2" ry="2" />
+<text  x="131.36" y="239.5" >&lt;froz..</text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (2,023 samples, 0.34%)</title><rect x="487.0" y="101" width="4.1" height="15.0" fill="rgb(231,203,6)" rx="2" ry="2" />
+<text  x="490.03" y="111.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (2,184 samples, 0.37%)</title><rect x="220.4" y="165" width="4.3" height="15.0" fill="rgb(227,153,49)" rx="2" ry="2" />
+<text  x="223.39" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,859 samples, 0.31%)</title><rect x="676.2" y="149" width="3.7" height="15.0" fill="rgb(229,190,17)" rx="2" ry="2" />
+<text  x="679.18" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,300 samples, 0.22%)</title><rect x="205.0" y="101" width="2.6" height="15.0" fill="rgb(218,195,33)" rx="2" ry="2" />
+<text  x="208.02" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,021 samples, 0.17%)</title><rect x="270.7" y="181" width="2.1" height="15.0" fill="rgb(241,36,15)" rx="2" ry="2" />
+<text  x="273.74" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,166 samples, 0.20%)</title><rect x="281.3" y="213" width="2.4" height="15.0" fill="rgb(226,102,33)" rx="2" ry="2" />
+<text  x="284.33" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,088 samples, 0.18%)</title><rect x="408.5" y="197" width="2.2" height="15.0" fill="rgb(217,20,43)" rx="2" ry="2" />
+<text  x="411.50" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (3,593 samples, 0.61%)</title><rect x="295.5" y="213" width="7.1" height="15.0" fill="rgb(242,48,54)" rx="2" ry="2" />
+<text  x="298.45" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/emoji.py:1:&lt;module&gt; (1,172 samples, 0.20%)</title><rect x="410.7" y="245" width="2.3" height="15.0" fill="rgb(205,19,43)" rx="2" ry="2" />
+<text  x="413.67" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (878 samples, 0.15%)</title><rect x="584.4" y="181" width="1.8" height="15.0" fill="rgb(243,171,49)" rx="2" ry="2" />
+<text  x="587.43" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (3,481 samples, 0.59%)</title><rect x="226.7" y="213" width="7.0" height="15.0" fill="rgb(232,187,38)" rx="2" ry="2" />
+<text  x="229.71" y="223.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (4,217 samples, 0.71%)</title><rect x="169.3" y="149" width="8.4" height="15.0" fill="rgb(216,88,36)" rx="2" ry="2" />
+<text  x="172.35" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/console.py:1:&lt;module&gt; (15,656 samples, 2.64%)</title><rect x="375.4" y="245" width="31.2" height="15.0" fill="rgb(215,76,35)" rx="2" ry="2" />
+<text  x="378.42" y="255.5" >/u..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,257 samples, 0.21%)</title><rect x="245.9" y="213" width="2.5" height="15.0" fill="rgb(237,127,27)" rx="2" ry="2" />
+<text  x="248.94" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_parse.py:937:parse (795 samples, 0.13%)</title><rect x="100.8" y="181" width="1.6" height="15.0" fill="rgb(235,175,39)" rx="2" ry="2" />
+<text  x="103.83" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (4,143 samples, 0.70%)</title><rect x="199.4" y="181" width="8.2" height="15.0" fill="rgb(227,150,14)" rx="2" ry="2" />
+<text  x="202.35" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (4,885 samples, 0.82%)</title><rect x="538.6" y="213" width="9.8" height="15.0" fill="rgb(246,100,30)" rx="2" ry="2" />
+<text  x="541.62" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/cells.py:12:cell_len (1,999 samples, 0.34%)</title><rect x="631.3" y="117" width="4.0" height="15.0" fill="rgb(254,2,13)" rx="2" ry="2" />
+<text  x="634.33" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (2,319 samples, 0.39%)</title><rect x="543.7" y="181" width="4.7" height="15.0" fill="rgb(206,201,48)" rx="2" ry="2" />
+<text  x="546.73" y="191.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (162,193 samples, 27.39%)</title><rect x="767.1" y="213" width="323.2" height="15.0" fill="rgb(224,161,29)" rx="2" ry="2" />
+<text  x="770.08" y="223.5" >/mnt/data/School/00-OLD/2020/463_NetSec/pro..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,025 samples, 0.17%)</title><rect x="89.0" y="229" width="2.1" height="15.0" fill="rgb(252,213,14)" rx="2" ry="2" />
+<text  x="92.04" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/functools.py:35:update_wrapper (830 samples, 0.14%)</title><rect x="455.3" y="213" width="1.7" height="15.0" fill="rgb(235,126,13)" rx="2" ry="2" />
+<text  x="458.34" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (797 samples, 0.13%)</title><rect x="533.3" y="197" width="1.6" height="15.0" fill="rgb(210,192,36)" rx="2" ry="2" />
+<text  x="536.31" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (955 samples, 0.16%)</title><rect x="145.7" y="149" width="1.9" height="15.0" fill="rgb(238,222,8)" rx="2" ry="2" />
+<text  x="148.67" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (939 samples, 0.16%)</title><rect x="283.7" y="213" width="1.9" height="15.0" fill="rgb(252,56,15)" rx="2" ry="2" />
+<text  x="286.74" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,748 samples, 0.30%)</title><rect x="407.2" y="229" width="3.5" height="15.0" fill="rgb(212,102,34)" rx="2" ry="2" />
+<text  x="410.19" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.sum&gt; (1,911 samples, 0.32%)</title><rect x="631.5" y="101" width="3.8" height="15.0" fill="rgb(209,50,14)" rx="2" ry="2" />
+<text  x="634.51" y="111.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/text.py:527:highlight_regex (8,469 samples, 1.43%)</title><rect x="595.8" y="133" width="16.8" height="15.0" fill="rgb(209,107,42)" rx="2" ry="2" />
+<text  x="598.77" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,570 samples, 0.27%)</title><rect x="426.3" y="197" width="3.2" height="15.0" fill="rgb(214,168,22)" rx="2" ry="2" />
+<text  x="429.35" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/json/decoder.py:1:&lt;module&gt; (673 samples, 0.11%)</title><rect x="91.1" y="245" width="1.3" height="15.0" fill="rgb(238,209,22)" rx="2" ry="2" />
+<text  x="94.08" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,074 samples, 0.18%)</title><rect x="410.9" y="213" width="2.1" height="15.0" fill="rgb(214,101,21)" rx="2" ry="2" />
+<text  x="413.86" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/pathlib.py:1:&lt;module&gt; (1,397 samples, 0.24%)</title><rect x="95.5" y="245" width="2.8" height="15.0" fill="rgb(205,90,25)" rx="2" ry="2" />
+<text  x="98.47" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (732 samples, 0.12%)</title><rect x="180.9" y="197" width="1.5" height="15.0" fill="rgb(225,116,4)" rx="2" ry="2" />
+<text  x="183.94" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,709 samples, 0.29%)</title><rect x="407.3" y="213" width="3.4" height="15.0" fill="rgb(239,155,50)" rx="2" ry="2" />
+<text  x="410.26" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,441 samples, 0.41%)</title><rect x="646.0" y="133" width="4.8" height="15.0" fill="rgb(236,166,33)" rx="2" ry="2" />
+<text  x="648.97" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,928 samples, 0.33%)</title><rect x="229.8" y="181" width="3.9" height="15.0" fill="rgb(206,205,20)" rx="2" ry="2" />
+<text  x="232.81" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (7,459 samples, 1.26%)</title><rect x="132.7" y="197" width="14.9" height="15.0" fill="rgb(238,16,4)" rx="2" ry="2" />
+<text  x="135.70" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,843 samples, 0.31%)</title><rect x="269.1" y="213" width="3.7" height="15.0" fill="rgb(233,216,9)" rx="2" ry="2" />
+<text  x="272.10" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (683 samples, 0.12%)</title><rect x="411.6" y="197" width="1.4" height="15.0" fill="rgb(224,178,52)" rx="2" ry="2" />
+<text  x="414.64" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (1,225 samples, 0.21%)</title><rect x="395.4" y="165" width="2.4" height="15.0" fill="rgb(232,46,18)" rx="2" ry="2" />
+<text  x="398.37" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (6,389 samples, 1.08%)</title><rect x="641.5" y="181" width="12.7" height="15.0" fill="rgb(233,144,33)" rx="2" ry="2" />
+<text  x="644.49" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/ctypes/util.py:270:_findSoname_ldconfig (1,906 samples, 0.32%)</title><rect x="60.9" y="213" width="3.8" height="15.0" fill="rgb(222,130,3)" rx="2" ry="2" />
+<text  x="63.94" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (1,025 samples, 0.17%)</title><rect x="320.1" y="197" width="2.0" height="15.0" fill="rgb(208,221,21)" rx="2" ry="2" />
+<text  x="323.08" y="207.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,824 samples, 0.31%)</title><rect x="76.6" y="133" width="3.6" height="15.0" fill="rgb(249,120,15)" rx="2" ry="2" />
+<text  x="79.58" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/color.py:1:&lt;module&gt; (1,272 samples, 0.21%)</title><rect x="372.9" y="245" width="2.5" height="15.0" fill="rgb(209,109,0)" rx="2" ry="2" />
+<text  x="375.89" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (770 samples, 0.13%)</title><rect x="520.0" y="165" width="1.5" height="15.0" fill="rgb(249,175,24)" rx="2" ry="2" />
+<text  x="522.95" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:11:get_wav_data (2,364 samples, 0.40%)</title><rect x="729.0" y="229" width="4.7" height="15.0" fill="rgb(235,54,15)" rx="2" ry="2" />
+<text  x="731.96" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/subprocess.py:1:&lt;module&gt; (1,689 samples, 0.29%)</title><rect x="582.8" y="245" width="3.4" height="15.0" fill="rgb(231,89,19)" rx="2" ry="2" />
+<text  x="585.82" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,193 samples, 0.20%)</title><rect x="281.3" y="229" width="2.4" height="15.0" fill="rgb(247,130,12)" rx="2" ry="2" />
+<text  x="284.28" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (902 samples, 0.15%)</title><rect x="167.3" y="117" width="1.8" height="15.0" fill="rgb(235,126,50)" rx="2" ry="2" />
+<text  x="170.31" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (5,012 samples, 0.85%)</title><rect x="538.4" y="229" width="10.0" height="15.0" fill="rgb(233,62,20)" rx="2" ry="2" />
+<text  x="541.36" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (2,468 samples, 0.42%)</title><rect x="424.6" y="213" width="4.9" height="15.0" fill="rgb(213,173,1)" rx="2" ry="2" />
+<text  x="427.56" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,318 samples, 0.39%)</title><rect x="513.6" y="149" width="4.6" height="15.0" fill="rgb(213,35,3)" rx="2" ry="2" />
+<text  x="516.61" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/elementwise.py:459:get_copy_kernel (1,538 samples, 0.26%)</title><rect x="1092.1" y="133" width="3.1" height="15.0" fill="rgb(249,136,4)" rx="2" ry="2" />
+<text  x="1095.09" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (83 samples, 0.01%)</title><rect x="645.8" y="117" width="0.2" height="15.0" fill="rgb(241,71,53)" rx="2" ry="2" />
+<text  x="648.80" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (7,169 samples, 1.21%)</title><rect x="133.3" y="165" width="14.3" height="15.0" fill="rgb(215,57,22)" rx="2" ry="2" />
+<text  x="136.28" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (942 samples, 0.16%)</title><rect x="116.7" y="181" width="1.9" height="15.0" fill="rgb(221,69,39)" rx="2" ry="2" />
+<text  x="119.72" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,001 samples, 0.17%)</title><rect x="362.5" y="229" width="2.0" height="15.0" fill="rgb(222,169,47)" rx="2" ry="2" />
+<text  x="365.47" y="239.5" ></text>
+</g>
+<g >
+<title>newencoder.py:71:write_wave (44,409 samples, 7.50%)</title><rect x="1101.5" y="229" width="88.5" height="15.0" fill="rgb(205,204,29)" rx="2" ry="2" />
+<text  x="1104.50" y="239.5" >newencoder..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (1,238 samples, 0.21%)</title><rect x="392.6" y="165" width="2.5" height="15.0" fill="rgb(217,227,19)" rx="2" ry="2" />
+<text  x="395.63" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (670 samples, 0.11%)</title><rect x="510.2" y="165" width="1.4" height="15.0" fill="rgb(252,172,24)" rx="2" ry="2" />
+<text  x="513.22" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (890 samples, 0.15%)</title><rect x="272.8" y="229" width="1.8" height="15.0" fill="rgb(236,70,7)" rx="2" ry="2" />
+<text  x="275.79" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,550 samples, 0.26%)</title><rect x="450.5" y="165" width="3.1" height="15.0" fill="rgb(211,87,54)" rx="2" ry="2" />
+<text  x="453.50" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,441 samples, 0.24%)</title><rect x="133.7" y="133" width="2.9" height="15.0" fill="rgb(212,153,18)" rx="2" ry="2" />
+<text  x="136.73" y="143.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (887 samples, 0.15%)</title><rect x="186.5" y="181" width="1.7" height="15.0" fill="rgb(225,81,36)" rx="2" ry="2" />
+<text  x="189.45" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (868 samples, 0.15%)</title><rect x="143.9" y="117" width="1.8" height="15.0" fill="rgb(230,35,17)" rx="2" ry="2" />
+<text  x="146.94" y="127.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/__init__.py:809:kernel__setup (1,618 samples, 0.27%)</title><rect x="1087.1" y="165" width="3.2" height="15.0" fill="rgb(241,213,11)" rx="2" ry="2" />
+<text  x="1090.08" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,378 samples, 0.23%)</title><rect x="522.1" y="181" width="2.8" height="15.0" fill="rgb(213,164,39)" rx="2" ry="2" />
+<text  x="525.13" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,589 samples, 0.27%)</title><rect x="573.0" y="197" width="3.2" height="15.0" fill="rgb(225,10,30)" rx="2" ry="2" />
+<text  x="576.05" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (781 samples, 0.13%)</title><rect x="581.3" y="213" width="1.5" height="15.0" fill="rgb(226,229,1)" rx="2" ry="2" />
+<text  x="584.26" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:169:__enter__ (792 samples, 0.13%)</title><rect x="659.1" y="213" width="1.6" height="15.0" fill="rgb(226,100,3)" rx="2" ry="2" />
+<text  x="662.10" y="223.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (898 samples, 0.15%)</title><rect x="390.8" y="85" width="1.8" height="15.0" fill="rgb(242,43,2)" rx="2" ry="2" />
+<text  x="393.84" y="95.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__build_class__&gt; (1,135 samples, 0.19%)</title><rect x="505.8" y="229" width="2.3" height="15.0" fill="rgb(254,177,21)" rx="2" ry="2" />
+<text  x="508.84" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,221 samples, 0.38%)</title><rect x="290.8" y="197" width="4.5" height="15.0" fill="rgb(236,204,19)" rx="2" ry="2" />
+<text  x="293.84" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,691 samples, 0.29%)</title><rect x="106.4" y="213" width="3.3" height="15.0" fill="rgb(249,228,17)" rx="2" ry="2" />
+<text  x="109.36" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,004 samples, 0.17%)</title><rect x="417.5" y="197" width="2.0" height="15.0" fill="rgb(239,204,24)" rx="2" ry="2" />
+<text  x="420.47" y="207.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (675 samples, 0.11%)</title><rect x="316.9" y="85" width="1.3" height="15.0" fill="rgb(229,226,43)" rx="2" ry="2" />
+<text  x="319.88" y="95.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (7,469 samples, 1.26%)</title><rect x="688.3" y="149" width="14.9" height="15.0" fill="rgb(229,126,27)" rx="2" ry="2" />
+<text  x="691.30" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (2,497 samples, 0.42%)</title><rect x="571.2" y="213" width="5.0" height="15.0" fill="rgb(244,23,38)" rx="2" ry="2" />
+<text  x="574.24" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (838 samples, 0.14%)</title><rect x="218.7" y="165" width="1.7" height="15.0" fill="rgb(214,144,32)" rx="2" ry="2" />
+<text  x="221.72" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (8,599 samples, 1.45%)</title><rect x="207.6" y="197" width="17.1" height="15.0" fill="rgb(218,35,6)" rx="2" ry="2" />
+<text  x="210.61" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (674 samples, 0.11%)</title><rect x="234.3" y="229" width="1.4" height="15.0" fill="rgb(230,14,12)" rx="2" ry="2" />
+<text  x="237.33" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,180 samples, 0.20%)</title><rect x="398.4" y="165" width="2.4" height="15.0" fill="rgb(253,133,35)" rx="2" ry="2" />
+<text  x="401.43" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method posix.stat&gt; (2,332 samples, 0.39%)</title><rect x="722.6" y="117" width="4.6" height="15.0" fill="rgb(210,192,23)" rx="2" ry="2" />
+<text  x="725.58" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,064 samples, 0.18%)</title><rect x="442.0" y="165" width="2.1" height="15.0" fill="rgb(239,196,47)" rx="2" ry="2" />
+<text  x="445.02" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (2,233 samples, 0.38%)</title><rect x="65.6" y="197" width="4.5" height="15.0" fill="rgb(242,150,12)" rx="2" ry="2" />
+<text  x="68.61" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (1,364 samples, 0.23%)</title><rect x="395.1" y="197" width="2.7" height="15.0" fill="rgb(226,214,42)" rx="2" ry="2" />
+<text  x="398.09" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/console.py:1331:render_str (8,881 samples, 1.50%)</title><rect x="595.0" y="181" width="17.6" height="15.0" fill="rgb(250,138,13)" rx="2" ry="2" />
+<text  x="597.95" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;__array_function__ internals&gt;:177:tile (1,921 samples, 0.32%)</title><rect x="1095.2" y="213" width="3.8" height="15.0" fill="rgb(219,40,14)" rx="2" ry="2" />
+<text  x="1098.15" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/re.py:288:_compile (1,857 samples, 0.31%)</title><rect x="608.9" y="101" width="3.7" height="15.0" fill="rgb(230,203,17)" rx="2" ry="2" />
+<text  x="611.95" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (937 samples, 0.16%)</title><rect x="107.9" y="181" width="1.8" height="15.0" fill="rgb(235,31,54)" rx="2" ry="2" />
+<text  x="110.86" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (4,930 samples, 0.83%)</title><rect x="310.3" y="197" width="9.8" height="15.0" fill="rgb(221,74,26)" rx="2" ry="2" />
+<text  x="313.25" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (698 samples, 0.12%)</title><rect x="520.1" y="149" width="1.4" height="15.0" fill="rgb(238,80,42)" rx="2" ry="2" />
+<text  x="523.10" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/compat/__init__.py:1:&lt;module&gt; (2,923 samples, 0.49%)</title><rect x="182.4" y="245" width="5.8" height="15.0" fill="rgb(241,222,42)" rx="2" ry="2" />
+<text  x="185.39" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (834 samples, 0.14%)</title><rect x="320.5" y="149" width="1.6" height="15.0" fill="rgb(206,45,44)" rx="2" ry="2" />
+<text  x="323.46" y="159.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (1,116 samples, 0.19%)</title><rect x="466.8" y="117" width="2.2" height="15.0" fill="rgb(254,131,3)" rx="2" ry="2" />
+<text  x="469.79" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (798 samples, 0.13%)</title><rect x="160.8" y="165" width="1.6" height="15.0" fill="rgb(221,53,53)" rx="2" ry="2" />
+<text  x="163.84" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,770 samples, 0.30%)</title><rect x="679.9" y="165" width="3.5" height="15.0" fill="rgb(251,60,4)" rx="2" ry="2" />
+<text  x="682.91" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_compile.py:759:compile (1,308 samples, 0.22%)</title><rect x="99.8" y="197" width="2.6" height="15.0" fill="rgb(248,183,7)" rx="2" ry="2" />
+<text  x="102.80" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (689 samples, 0.12%)</title><rect x="579.8" y="229" width="1.4" height="15.0" fill="rgb(227,178,18)" rx="2" ry="2" />
+<text  x="582.80" y="239.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,150 samples, 0.19%)</title><rect x="293.0" y="181" width="2.3" height="15.0" fill="rgb(243,189,20)" rx="2" ry="2" />
+<text  x="295.97" y="191.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:1151:close (933 samples, 0.16%)</title><rect x="178.2" y="117" width="1.8" height="15.0" fill="rgb(243,158,15)" rx="2" ry="2" />
+<text  x="181.19" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (739 samples, 0.12%)</title><rect x="323.2" y="197" width="1.5" height="15.0" fill="rgb(220,85,10)" rx="2" ry="2" />
+<text  x="326.22" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (691 samples, 0.12%)</title><rect x="267.4" y="213" width="1.4" height="15.0" fill="rgb(219,2,17)" rx="2" ry="2" />
+<text  x="270.43" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:564:module_from_spec (3,078 samples, 0.52%)</title><rect x="673.7" y="181" width="6.2" height="15.0" fill="rgb(222,26,49)" rx="2" ry="2" />
+<text  x="676.75" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (870 samples, 0.15%)</title><rect x="432.9" y="197" width="1.7" height="15.0" fill="rgb(254,120,36)" rx="2" ry="2" />
+<text  x="435.87" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,015 samples, 0.17%)</title><rect x="285.7" y="213" width="2.0" height="15.0" fill="rgb(234,5,40)" rx="2" ry="2" />
+<text  x="288.69" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,872 samples, 0.32%)</title><rect x="102.5" y="213" width="3.7" height="15.0" fill="rgb(206,118,19)" rx="2" ry="2" />
+<text  x="105.49" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (281 samples, 0.05%)</title><rect x="687.7" y="133" width="0.6" height="15.0" fill="rgb(234,42,45)" rx="2" ry="2" />
+<text  x="690.74" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (922 samples, 0.16%)</title><rect x="360.2" y="165" width="1.9" height="15.0" fill="rgb(215,172,11)" rx="2" ry="2" />
+<text  x="363.25" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (5,894 samples, 1.00%)</title><rect x="661.4" y="197" width="11.8" height="15.0" fill="rgb(216,157,53)" rx="2" ry="2" />
+<text  x="664.42" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/highlighter.py:67:highlight (8,500 samples, 1.44%)</title><rect x="595.7" y="149" width="16.9" height="15.0" fill="rgb(237,204,27)" rx="2" ry="2" />
+<text  x="598.71" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (1,268 samples, 0.21%)</title><rect x="288.3" y="197" width="2.5" height="15.0" fill="rgb(224,206,5)" rx="2" ry="2" />
+<text  x="291.31" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (920 samples, 0.16%)</title><rect x="320.3" y="165" width="1.8" height="15.0" fill="rgb(245,29,1)" rx="2" ry="2" />
+<text  x="323.29" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (13,818 samples, 2.33%)</title><rect x="469.0" y="197" width="27.5" height="15.0" fill="rgb(223,87,44)" rx="2" ry="2" />
+<text  x="472.01" y="207.5" >&lt;..</text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,066 samples, 0.18%)</title><rect x="422.3" y="149" width="2.1" height="15.0" fill="rgb(244,144,24)" rx="2" ry="2" />
+<text  x="425.30" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (4,025 samples, 0.68%)</title><rect x="199.6" y="165" width="8.0" height="15.0" fill="rgb(217,151,44)" rx="2" ry="2" />
+<text  x="202.59" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,744 samples, 0.29%)</title><rect x="638.0" y="181" width="3.5" height="15.0" fill="rgb(226,104,42)" rx="2" ry="2" />
+<text  x="641.01" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/array.py:959:_copy (1,593 samples, 0.27%)</title><rect x="1092.0" y="181" width="3.2" height="15.0" fill="rgb(251,151,0)" rx="2" ry="2" />
+<text  x="1094.98" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,441 samples, 0.24%)</title><rect x="502.6" y="213" width="2.9" height="15.0" fill="rgb(209,62,34)" rx="2" ry="2" />
+<text  x="505.63" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (3,682 samples, 0.62%)</title><rect x="385.3" y="149" width="7.3" height="15.0" fill="rgb(212,141,32)" rx="2" ry="2" />
+<text  x="388.29" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,130 samples, 0.19%)</title><rect x="251.0" y="197" width="2.3" height="15.0" fill="rgb(227,46,5)" rx="2" ry="2" />
+<text  x="254.03" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,046 samples, 0.18%)</title><rect x="285.6" y="229" width="2.1" height="15.0" fill="rgb(249,137,21)" rx="2" ry="2" />
+<text  x="288.63" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/cltypes.py:1:&lt;module&gt; (9,325 samples, 1.57%)</title><rect x="324.7" y="245" width="18.6" height="15.0" fill="rgb(246,86,19)" rx="2" ry="2" />
+<text  x="327.69" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,609 samples, 0.27%)</title><rect x="133.4" y="149" width="3.2" height="15.0" fill="rgb(222,211,36)" rx="2" ry="2" />
+<text  x="136.39" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/random/__init__.py:1:&lt;module&gt; (3,789 samples, 0.64%)</title><rect x="287.7" y="245" width="7.6" height="15.0" fill="rgb(242,75,33)" rx="2" ry="2" />
+<text  x="290.71" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (10,518 samples, 1.78%)</title><rect x="637.0" y="213" width="20.9" height="15.0" fill="rgb(216,98,40)" rx="2" ry="2" />
+<text  x="639.99" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (746 samples, 0.13%)</title><rect x="109.9" y="213" width="1.5" height="15.0" fill="rgb(254,169,36)" rx="2" ry="2" />
+<text  x="112.92" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,274 samples, 0.22%)</title><rect x="359.5" y="197" width="2.6" height="15.0" fill="rgb(243,201,46)" rx="2" ry="2" />
+<text  x="362.54" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (866 samples, 0.15%)</title><rect x="344.2" y="197" width="1.7" height="15.0" fill="rgb(238,209,49)" rx="2" ry="2" />
+<text  x="347.17" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/_log_render.py:1:&lt;module&gt; (3,023 samples, 0.51%)</title><rect x="364.5" y="245" width="6.0" height="15.0" fill="rgb(238,116,44)" rx="2" ry="2" />
+<text  x="367.46" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (865 samples, 0.15%)</title><rect x="447.6" y="197" width="1.7" height="15.0" fill="rgb(223,72,43)" rx="2" ry="2" />
+<text  x="450.59" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/__init__.py:801:kernel_init (1,975 samples, 0.33%)</title><rect x="1086.4" y="181" width="3.9" height="15.0" fill="rgb(238,13,33)" rx="2" ry="2" />
+<text  x="1089.37" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (135 samples, 0.02%)</title><rect x="476.0" y="133" width="0.3" height="15.0" fill="rgb(225,89,11)" rx="2" ry="2" />
+<text  x="479.01" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:126:_path_join (890 samples, 0.15%)</title><rect x="720.7" y="133" width="1.8" height="15.0" fill="rgb(250,216,50)" rx="2" ry="2" />
+<text  x="723.70" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (10,647 samples, 1.80%)</title><rect x="376.6" y="229" width="21.2" height="15.0" fill="rgb(245,80,30)" rx="2" ry="2" />
+<text  x="379.59" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (2,470 samples, 0.42%)</title><rect x="497.7" y="149" width="4.9" height="15.0" fill="rgb(247,22,2)" rx="2" ry="2" />
+<text  x="500.68" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/__init__.py:499:build (1,996 samples, 0.34%)</title><rect x="1082.4" y="181" width="4.0" height="15.0" fill="rgb(231,175,34)" rx="2" ry="2" />
+<text  x="1085.38" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/matlab/_mio.py:1:&lt;module&gt; (4,964 samples, 0.84%)</title><rect x="548.4" y="245" width="9.8" height="15.0" fill="rgb(234,84,41)" rx="2" ry="2" />
+<text  x="551.35" y="255.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (4,451 samples, 0.75%)</title><rect x="215.9" y="181" width="8.8" height="15.0" fill="rgb(234,216,13)" rx="2" ry="2" />
+<text  x="218.88" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (7,417 samples, 1.25%)</title><rect x="476.3" y="149" width="14.8" height="15.0" fill="rgb(246,97,33)" rx="2" ry="2" />
+<text  x="479.28" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (681 samples, 0.12%)</title><rect x="574.9" y="149" width="1.3" height="15.0" fill="rgb(205,220,47)" rx="2" ry="2" />
+<text  x="577.86" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,588 samples, 0.27%)</title><rect x="367.3" y="181" width="3.2" height="15.0" fill="rgb(214,140,5)" rx="2" ry="2" />
+<text  x="370.32" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (156 samples, 0.03%)</title><rect x="663.7" y="165" width="0.3" height="15.0" fill="rgb(224,85,30)" rx="2" ry="2" />
+<text  x="666.68" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,215 samples, 0.37%)</title><rect x="229.2" y="197" width="4.5" height="15.0" fill="rgb(248,193,2)" rx="2" ry="2" />
+<text  x="232.24" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,914 samples, 0.32%)</title><rect x="102.4" y="229" width="3.8" height="15.0" fill="rgb(237,200,20)" rx="2" ry="2" />
+<text  x="105.41" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:140:_path_stat (2,388 samples, 0.40%)</title><rect x="722.5" y="133" width="4.7" height="15.0" fill="rgb(227,19,44)" rx="2" ry="2" />
+<text  x="725.47" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,033 samples, 0.17%)</title><rect x="586.2" y="229" width="2.1" height="15.0" fill="rgb(217,104,54)" rx="2" ry="2" />
+<text  x="589.24" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (765 samples, 0.13%)</title><rect x="109.9" y="229" width="1.5" height="15.0" fill="rgb(228,87,7)" rx="2" ry="2" />
+<text  x="112.88" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,774 samples, 0.30%)</title><rect x="254.0" y="181" width="3.5" height="15.0" fill="rgb(225,135,17)" rx="2" ry="2" />
+<text  x="257.01" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,507 samples, 0.25%)</title><rect x="555.2" y="149" width="3.0" height="15.0" fill="rgb(227,4,5)" rx="2" ry="2" />
+<text  x="558.24" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (1,216 samples, 0.21%)</title><rect x="398.4" y="197" width="2.4" height="15.0" fill="rgb(231,62,42)" rx="2" ry="2" />
+<text  x="401.35" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (782 samples, 0.13%)</title><rect x="373.9" y="213" width="1.5" height="15.0" fill="rgb(219,73,35)" rx="2" ry="2" />
+<text  x="376.86" y="223.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:1301:_array_io (8,280 samples, 1.40%)</title><rect x="1173.5" y="181" width="16.5" height="15.0" fill="rgb(247,67,4)" rx="2" ry="2" />
+<text  x="1176.50" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (2,372 samples, 0.40%)</title><rect x="439.4" y="229" width="4.7" height="15.0" fill="rgb(223,66,29)" rx="2" ry="2" />
+<text  x="442.41" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__build_class__&gt; (953 samples, 0.16%)</title><rect x="85.2" y="229" width="1.9" height="15.0" fill="rgb(234,55,22)" rx="2" ry="2" />
+<text  x="88.19" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (726 samples, 0.12%)</title><rect x="195.7" y="165" width="1.4" height="15.0" fill="rgb(206,192,5)" rx="2" ry="2" />
+<text  x="198.65" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:71:write_wave (1,154 samples, 0.19%)</title><rect x="177.7" y="165" width="2.3" height="15.0" fill="rgb(227,99,8)" rx="2" ry="2" />
+<text  x="180.75" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (3,909 samples, 0.66%)</title><rect x="416.6" y="213" width="7.8" height="15.0" fill="rgb(214,101,21)" rx="2" ry="2" />
+<text  x="419.64" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (11,344 samples, 1.92%)</title><rect x="473.9" y="181" width="22.6" height="15.0" fill="rgb(241,111,21)" rx="2" ry="2" />
+<text  x="476.94" y="191.5" >&lt;..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (2,892 samples, 0.49%)</title><rect x="182.5" y="213" width="5.7" height="15.0" fill="rgb(216,80,34)" rx="2" ry="2" />
+<text  x="185.46" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,224 samples, 0.21%)</title><rect x="200.6" y="149" width="2.4" height="15.0" fill="rgb(212,114,10)" rx="2" ry="2" />
+<text  x="203.60" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (3,131 samples, 0.53%)</title><rect x="644.6" y="149" width="6.2" height="15.0" fill="rgb(210,44,27)" rx="2" ry="2" />
+<text  x="647.59" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (4,094 samples, 0.69%)</title><rect x="521.6" y="213" width="8.1" height="15.0" fill="rgb(239,215,27)" rx="2" ry="2" />
+<text  x="524.55" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/arff/_arffread.py:1:&lt;module&gt; (1,165 samples, 0.20%)</title><rect x="534.9" y="245" width="2.3" height="15.0" fill="rgb(246,162,42)" rx="2" ry="2" />
+<text  x="537.90" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (3,070 samples, 0.52%)</title><rect x="112.5" y="213" width="6.1" height="15.0" fill="rgb(212,181,7)" rx="2" ry="2" />
+<text  x="115.48" y="223.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:1314:_cdata_io (8,258 samples, 1.39%)</title><rect x="1173.5" y="165" width="16.5" height="15.0" fill="rgb(246,157,10)" rx="2" ry="2" />
+<text  x="1176.54" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/table.py:1:&lt;module&gt; (1,976 samples, 0.33%)</title><rect x="434.6" y="245" width="3.9" height="15.0" fill="rgb(223,60,33)" rx="2" ry="2" />
+<text  x="437.60" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (730 samples, 0.12%)</title><rect x="584.7" y="165" width="1.5" height="15.0" fill="rgb(222,143,16)" rx="2" ry="2" />
+<text  x="587.73" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/sparse/_csr.py:1:&lt;module&gt; (702 samples, 0.12%)</title><rect x="579.8" y="245" width="1.4" height="15.0" fill="rgb(218,208,9)" rx="2" ry="2" />
+<text  x="582.78" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (33,395 samples, 5.64%)</title><rect x="660.7" y="213" width="66.5" height="15.0" fill="rgb(213,42,25)" rx="2" ry="2" />
+<text  x="663.68" y="223.5" >&lt;frozen..</text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,064 samples, 0.18%)</title><rect x="379.9" y="165" width="2.1" height="15.0" fill="rgb(212,91,52)" rx="2" ry="2" />
+<text  x="382.91" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (6,506 samples, 1.10%)</title><rect x="508.5" y="213" width="13.0" height="15.0" fill="rgb(246,53,20)" rx="2" ry="2" />
+<text  x="511.52" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:492:_init_module_attrs (1,055 samples, 0.18%)</title><rect x="674.0" y="165" width="2.1" height="15.0" fill="rgb(253,77,20)" rx="2" ry="2" />
+<text  x="677.03" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/re.py:249:compile (760 samples, 0.13%)</title><rect x="535.7" y="229" width="1.5" height="15.0" fill="rgb(211,122,20)" rx="2" ry="2" />
+<text  x="538.70" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (4,689 samples, 0.79%)</title><rect x="346.9" y="213" width="9.3" height="15.0" fill="rgb(222,40,53)" rx="2" ry="2" />
+<text  x="349.85" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1174:create_module (1,881 samples, 0.32%)</title><rect x="676.1" y="165" width="3.8" height="15.0" fill="rgb(206,130,0)" rx="2" ry="2" />
+<text  x="679.13" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (2,201 samples, 0.37%)</title><rect x="263.0" y="181" width="4.4" height="15.0" fill="rgb(241,99,21)" rx="2" ry="2" />
+<text  x="266.03" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,990 samples, 0.34%)</title><rect x="298.6" y="181" width="4.0" height="15.0" fill="rgb(236,130,17)" rx="2" ry="2" />
+<text  x="301.65" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method pyopencl._cl.get_platforms&gt; (1,522 samples, 0.26%)</title><rect x="174.7" y="101" width="3.0" height="15.0" fill="rgb(207,126,13)" rx="2" ry="2" />
+<text  x="177.72" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (3,146 samples, 0.53%)</title><rect x="312.0" y="165" width="6.2" height="15.0" fill="rgb(209,181,21)" rx="2" ry="2" />
+<text  x="314.95" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (5,678 samples, 0.96%)</title><rect x="715.9" y="165" width="11.3" height="15.0" fill="rgb(229,174,45)" rx="2" ry="2" />
+<text  x="718.92" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (15,652 samples, 2.64%)</title><rect x="683.4" y="181" width="31.2" height="15.0" fill="rgb(234,135,53)" rx="2" ry="2" />
+<text  x="686.44" y="191.5" >&lt;f..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (860 samples, 0.15%)</title><rect x="303.7" y="197" width="1.7" height="15.0" fill="rgb(205,61,1)" rx="2" ry="2" />
+<text  x="306.68" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (978 samples, 0.17%)</title><rect x="362.5" y="213" width="2.0" height="15.0" fill="rgb(219,7,9)" rx="2" ry="2" />
+<text  x="365.51" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/wavfile.py:399:_read_data_chunk (2,182 samples, 0.37%)</title><rect x="729.3" y="197" width="4.4" height="15.0" fill="rgb(214,178,53)" rx="2" ry="2" />
+<text  x="732.32" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,713 samples, 0.29%)</title><rect x="554.8" y="165" width="3.4" height="15.0" fill="rgb(254,215,17)" rx="2" ry="2" />
+<text  x="557.83" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/ctypes/util.py:327:find_library (1,919 samples, 0.32%)</title><rect x="60.9" y="229" width="3.8" height="15.0" fill="rgb(223,1,18)" rx="2" ry="2" />
+<text  x="63.91" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/attr/__init__.py:1:&lt;module&gt; (3,607 samples, 0.61%)</title><rect x="111.4" y="245" width="7.2" height="15.0" fill="rgb(223,169,49)" rx="2" ry="2" />
+<text  x="114.41" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (2,415 samples, 0.41%)</title><rect x="338.5" y="181" width="4.8" height="15.0" fill="rgb(215,83,23)" rx="2" ry="2" />
+<text  x="341.46" y="191.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:32:get_prefered_context (766 samples, 0.13%)</title><rect x="223.2" y="117" width="1.5" height="15.0" fill="rgb(215,166,22)" rx="2" ry="2" />
+<text  x="226.22" y="127.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method numpy.core._multiarray_umath.implement_array_function&gt; (1,917 samples, 0.32%)</title><rect x="1095.2" y="197" width="3.8" height="15.0" fill="rgb(239,95,15)" rx="2" ry="2" />
+<text  x="1098.16" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (22,226 samples, 3.75%)</title><rect x="458.3" y="213" width="44.3" height="15.0" fill="rgb(209,91,32)" rx="2" ry="2" />
+<text  x="461.31" y="223.5" >&lt;fro..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (722 samples, 0.12%)</title><rect x="92.5" y="229" width="1.5" height="15.0" fill="rgb(236,4,8)" rx="2" ry="2" />
+<text  x="95.51" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (1,185 samples, 0.20%)</title><rect x="80.2" y="165" width="2.4" height="15.0" fill="rgb(227,125,23)" rx="2" ry="2" />
+<text  x="83.21" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (781 samples, 0.13%)</title><rect x="160.9" y="149" width="1.5" height="15.0" fill="rgb(254,104,37)" rx="2" ry="2" />
+<text  x="163.88" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method posix.stat&gt; (690 samples, 0.12%)</title><rect x="656.6" y="101" width="1.3" height="15.0" fill="rgb(210,130,48)" rx="2" ry="2" />
+<text  x="659.57" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (2,756 samples, 0.47%)</title><rect x="491.1" y="165" width="5.4" height="15.0" fill="rgb(250,60,32)" rx="2" ry="2" />
+<text  x="494.06" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pytools/persistent_dict.py:473:__init__ (921 samples, 0.16%)</title><rect x="344.1" y="213" width="1.8" height="15.0" fill="rgb(235,123,30)" rx="2" ry="2" />
+<text  x="347.06" y="223.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (895 samples, 0.15%)</title><rect x="78.4" y="117" width="1.8" height="15.0" fill="rgb(254,88,40)" rx="2" ry="2" />
+<text  x="81.43" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (3,835 samples, 0.65%)</title><rect x="558.5" y="213" width="7.7" height="15.0" fill="rgb(223,223,19)" rx="2" ry="2" />
+<text  x="561.54" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,345 samples, 0.23%)</title><rect x="522.2" y="165" width="2.7" height="15.0" fill="rgb(237,229,20)" rx="2" ry="2" />
+<text  x="525.19" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/arff/__init__.py:1:&lt;module&gt; (1,365 samples, 0.23%)</title><rect x="532.2" y="245" width="2.7" height="15.0" fill="rgb(236,192,42)" rx="2" ry="2" />
+<text  x="535.18" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:670:_compile_bytecode (832 samples, 0.14%)</title><rect x="652.6" y="133" width="1.6" height="15.0" fill="rgb(209,30,44)" rx="2" ry="2" />
+<text  x="655.56" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1174:create_module (903 samples, 0.15%)</title><rect x="470.4" y="165" width="1.8" height="15.0" fill="rgb(253,226,11)" rx="2" ry="2" />
+<text  x="473.44" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,286 samples, 0.39%)</title><rect x="298.1" y="197" width="4.5" height="15.0" fill="rgb(242,133,26)" rx="2" ry="2" />
+<text  x="301.06" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/_emoji_replace.py:1:&lt;module&gt; (1,194 samples, 0.20%)</title><rect x="362.1" y="245" width="2.4" height="15.0" fill="rgb(211,87,15)" rx="2" ry="2" />
+<text  x="365.08" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (845 samples, 0.14%)</title><rect x="344.2" y="181" width="1.7" height="15.0" fill="rgb(213,27,33)" rx="2" ry="2" />
+<text  x="347.21" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/__init__.py:1:&lt;module&gt; (8,392 samples, 1.42%)</title><rect x="305.4" y="245" width="16.7" height="15.0" fill="rgb(246,16,43)" rx="2" ry="2" />
+<text  x="308.40" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,150 samples, 0.19%)</title><rect x="573.9" y="165" width="2.3" height="15.0" fill="rgb(213,140,39)" rx="2" ry="2" />
+<text  x="576.92" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,824 samples, 0.31%)</title><rect x="366.9" y="197" width="3.6" height="15.0" fill="rgb(209,3,52)" rx="2" ry="2" />
+<text  x="369.85" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (770 samples, 0.13%)</title><rect x="257.7" y="213" width="1.5" height="15.0" fill="rgb(213,75,37)" rx="2" ry="2" />
+<text  x="260.69" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (70 samples, 0.01%)</title><rect x="73.0" y="149" width="0.2" height="15.0" fill="rgb(245,66,17)" rx="2" ry="2" />
+<text  x="76.05" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,076 samples, 0.18%)</title><rect x="107.6" y="197" width="2.1" height="15.0" fill="rgb(234,28,28)" rx="2" ry="2" />
+<text  x="110.59" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (745 samples, 0.13%)</title><rect x="523.4" y="133" width="1.5" height="15.0" fill="rgb(210,78,39)" rx="2" ry="2" />
+<text  x="526.39" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/_version.py:1:&lt;module&gt; (1,177 samples, 0.20%)</title><rect x="180.0" y="245" width="2.4" height="15.0" fill="rgb(245,221,9)" rx="2" ry="2" />
+<text  x="183.05" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/polynomial/__init__.py:1:&lt;module&gt; (1,057 samples, 0.18%)</title><rect x="285.6" y="245" width="2.1" height="15.0" fill="rgb(254,156,34)" rx="2" ry="2" />
+<text  x="288.61" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,150 samples, 0.19%)</title><rect x="180.1" y="213" width="2.3" height="15.0" fill="rgb(239,223,22)" rx="2" ry="2" />
+<text  x="183.10" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;method 'read' of '_io.BufferedReader' objects&gt; (893 samples, 0.15%)</title><rect x="63.0" y="197" width="1.7" height="15.0" fill="rgb(215,189,13)" rx="2" ry="2" />
+<text  x="65.95" y="207.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (666 samples, 0.11%)</title><rect x="243.8" y="133" width="1.3" height="15.0" fill="rgb(220,103,10)" rx="2" ry="2" />
+<text  x="246.82" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/console.py:1227:render (9,996 samples, 1.69%)</title><rect x="617.1" y="181" width="19.9" height="15.0" fill="rgb(248,220,26)" rx="2" ry="2" />
+<text  x="620.07" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__build_class__&gt; (2,327 samples, 0.39%)</title><rect x="566.2" y="229" width="4.6" height="15.0" fill="rgb(223,155,35)" rx="2" ry="2" />
+<text  x="569.19" y="239.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (2,081 samples, 0.35%)</title><rect x="486.9" y="117" width="4.2" height="15.0" fill="rgb(216,95,45)" rx="2" ry="2" />
+<text  x="489.91" y="127.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method _imp.exec_dynamic&gt; (883 samples, 0.15%)</title><rect x="685.9" y="149" width="1.7" height="15.0" fill="rgb(232,61,35)" rx="2" ry="2" />
+<text  x="688.87" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method _imp.exec_dynamic&gt; (883 samples, 0.15%)</title><rect x="130.9" y="197" width="1.8" height="15.0" fill="rgb(246,46,30)" rx="2" ry="2" />
+<text  x="133.94" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_parse.py:937:parse (1,077 samples, 0.18%)</title><rect x="610.5" y="69" width="2.1" height="15.0" fill="rgb(221,19,11)" rx="2" ry="2" />
+<text  x="613.50" y="79.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/ma/core.py:1:&lt;module&gt; (801 samples, 0.14%)</title><rect x="279.7" y="245" width="1.6" height="15.0" fill="rgb(242,50,52)" rx="2" ry="2" />
+<text  x="282.68" y="255.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (1,130 samples, 0.19%)</title><rect x="466.8" y="133" width="2.2" height="15.0" fill="rgb(236,103,32)" rx="2" ry="2" />
+<text  x="469.76" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/invoker.py:1:&lt;module&gt; (1,313 samples, 0.22%)</title><rect x="343.3" y="245" width="2.6" height="15.0" fill="rgb(250,99,12)" rx="2" ry="2" />
+<text  x="346.28" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:670:_compile_bytecode (1,348 samples, 0.23%)</title><rect x="493.9" y="149" width="2.6" height="15.0" fill="rgb(247,10,8)" rx="2" ry="2" />
+<text  x="496.86" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (9,801 samples, 1.66%)</title><rect x="683.7" y="165" width="19.5" height="15.0" fill="rgb(236,148,49)" rx="2" ry="2" />
+<text  x="686.65" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (687 samples, 0.12%)</title><rect x="188.9" y="197" width="1.4" height="15.0" fill="rgb(239,72,36)" rx="2" ry="2" />
+<text  x="191.93" y="207.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,906 samples, 0.32%)</title><rect x="388.8" y="133" width="3.8" height="15.0" fill="rgb(235,131,49)" rx="2" ry="2" />
+<text  x="391.83" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,193 samples, 0.37%)</title><rect x="561.8" y="197" width="4.4" height="15.0" fill="rgb(245,90,9)" rx="2" ry="2" />
+<text  x="564.81" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (856 samples, 0.14%)</title><rect x="523.2" y="149" width="1.7" height="15.0" fill="rgb(239,136,18)" rx="2" ry="2" />
+<text  x="526.17" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,528 samples, 0.43%)</title><rect x="262.4" y="197" width="5.0" height="15.0" fill="rgb(222,79,13)" rx="2" ry="2" />
+<text  x="265.38" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,793 samples, 0.47%)</title><rect x="542.8" y="197" width="5.6" height="15.0" fill="rgb(234,138,24)" rx="2" ry="2" />
+<text  x="545.79" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (4,006 samples, 0.68%)</title><rect x="72.2" y="165" width="8.0" height="15.0" fill="rgb(230,142,9)" rx="2" ry="2" />
+<text  x="75.23" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (973 samples, 0.16%)</title><rect x="182.9" y="181" width="1.9" height="15.0" fill="rgb(242,124,24)" rx="2" ry="2" />
+<text  x="185.87" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/shape_base.py:1:&lt;module&gt; (844 samples, 0.14%)</title><rect x="257.5" y="245" width="1.7" height="15.0" fill="rgb(232,130,13)" rx="2" ry="2" />
+<text  x="260.54" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (5,744 samples, 0.97%)</title><rect x="703.2" y="165" width="11.4" height="15.0" fill="rgb(245,191,20)" rx="2" ry="2" />
+<text  x="706.18" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,099 samples, 0.19%)</title><rect x="677.7" y="133" width="2.2" height="15.0" fill="rgb(243,30,26)" rx="2" ry="2" />
+<text  x="680.69" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (777 samples, 0.13%)</title><rect x="257.7" y="229" width="1.5" height="15.0" fill="rgb(210,93,23)" rx="2" ry="2" />
+<text  x="260.68" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (4,634 samples, 0.78%)</title><rect x="235.9" y="229" width="9.2" height="15.0" fill="rgb(212,29,13)" rx="2" ry="2" />
+<text  x="238.91" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (1,700 samples, 0.29%)</title><rect x="650.8" y="149" width="3.4" height="15.0" fill="rgb(231,213,5)" rx="2" ry="2" />
+<text  x="653.83" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/numerictypes.py:1:&lt;module&gt; (671 samples, 0.11%)</title><rect x="248.4" y="245" width="1.4" height="15.0" fill="rgb(223,44,1)" rx="2" ry="2" />
+<text  x="251.44" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/secrets.py:1:&lt;module&gt; (1,760 samples, 0.30%)</title><rect x="106.2" y="245" width="3.5" height="15.0" fill="rgb(222,69,53)" rx="2" ry="2" />
+<text  x="109.22" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (34,767 samples, 5.87%)</title><rect x="657.9" y="229" width="69.3" height="15.0" fill="rgb(220,83,39)" rx="2" ry="2" />
+<text  x="660.95" y="239.5" >&lt;frozen..</text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,336 samples, 0.23%)</title><rect x="141.3" y="85" width="2.6" height="15.0" fill="rgb(250,27,37)" rx="2" ry="2" />
+<text  x="144.27" y="95.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_add_newdocs.py:1:&lt;module&gt; (704 samples, 0.12%)</title><rect x="224.7" y="245" width="1.4" height="15.0" fill="rgb(247,33,39)" rx="2" ry="2" />
+<text  x="227.75" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:140:_path_stat (1,146 samples, 0.19%)</title><rect x="500.3" y="133" width="2.3" height="15.0" fill="rgb(246,155,29)" rx="2" ry="2" />
+<text  x="503.32" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/__init__.py:47:print (33,567 samples, 5.67%)</title><rect x="591.1" y="229" width="66.8" height="15.0" fill="rgb(224,15,4)" rx="2" ry="2" />
+<text  x="594.06" y="239.5" >/usr/li..</text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/cache.py:323:_create_built_program_from_source_cached (1,126 samples, 0.19%)</title><rect x="1084.1" y="117" width="2.3" height="15.0" fill="rgb(216,188,51)" rx="2" ry="2" />
+<text  x="1087.11" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (862 samples, 0.15%)</title><rect x="104.5" y="165" width="1.7" height="15.0" fill="rgb(225,51,36)" rx="2" ry="2" />
+<text  x="107.51" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method _imp.create_dynamic&gt; (928 samples, 0.16%)</title><rect x="684.0" y="149" width="1.9" height="15.0" fill="rgb(242,124,18)" rx="2" ry="2" />
+<text  x="687.02" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (4,128 samples, 0.70%)</title><rect x="511.6" y="197" width="8.2" height="15.0" fill="rgb(240,147,40)" rx="2" ry="2" />
+<text  x="514.55" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,908 samples, 0.49%)</title><rect x="337.5" y="197" width="5.8" height="15.0" fill="rgb(214,27,54)" rx="2" ry="2" />
+<text  x="340.48" y="207.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (726 samples, 0.12%)</title><rect x="201.6" y="133" width="1.4" height="15.0" fill="rgb(212,77,29)" rx="2" ry="2" />
+<text  x="204.60" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (1,696 samples, 0.29%)</title><rect x="654.6" y="165" width="3.3" height="15.0" fill="rgb(232,175,36)" rx="2" ry="2" />
+<text  x="657.57" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method marshal.loads&gt; (2,696 samples, 0.46%)</title><rect x="709.3" y="133" width="5.3" height="15.0" fill="rgb(251,23,0)" rx="2" ry="2" />
+<text  x="712.26" y="143.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (693 samples, 0.12%)</title><rect x="243.8" y="165" width="1.3" height="15.0" fill="rgb(205,89,52)" rx="2" ry="2" />
+<text  x="246.76" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,008 samples, 0.17%)</title><rect x="113.0" y="165" width="2.0" height="15.0" fill="rgb(238,171,26)" rx="2" ry="2" />
+<text  x="115.96" y="175.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:32:get_prefered_context (1,523 samples, 0.26%)</title><rect x="174.7" y="117" width="3.0" height="15.0" fill="rgb(218,60,31)" rx="2" ry="2" />
+<text  x="177.71" y="127.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,633 samples, 0.28%)</title><rect x="340.0" y="149" width="3.3" height="15.0" fill="rgb(231,150,23)" rx="2" ry="2" />
+<text  x="343.02" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,009 samples, 0.17%)</title><rect x="584.2" y="197" width="2.0" height="15.0" fill="rgb(246,12,50)" rx="2" ry="2" />
+<text  x="587.17" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/re.py:288:_compile (758 samples, 0.13%)</title><rect x="535.7" y="213" width="1.5" height="15.0" fill="rgb(219,124,27)" rx="2" ry="2" />
+<text  x="538.71" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/__init__.py:1:&lt;module&gt; (15,583 samples, 2.63%)</title><rect x="193.7" y="245" width="31.0" height="15.0" fill="rgb(211,20,53)" rx="2" ry="2" />
+<text  x="196.69" y="255.5" >/u..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (3,835 samples, 0.65%)</title><rect x="249.9" y="229" width="7.6" height="15.0" fill="rgb(225,46,1)" rx="2" ry="2" />
+<text  x="252.90" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (13,769 samples, 2.33%)</title><rect x="197.3" y="213" width="27.4" height="15.0" fill="rgb(248,162,3)" rx="2" ry="2" />
+<text  x="200.31" y="223.5" >&lt;..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (1,062 samples, 0.18%)</title><rect x="83.1" y="149" width="2.1" height="15.0" fill="rgb(226,118,30)" rx="2" ry="2" />
+<text  x="86.06" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (91 samples, 0.02%)</title><rect x="459.7" y="181" width="0.2" height="15.0" fill="rgb(218,121,50)" rx="2" ry="2" />
+<text  x="462.71" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (1,305 samples, 0.22%)</title><rect x="82.6" y="197" width="2.6" height="15.0" fill="rgb(237,189,4)" rx="2" ry="2" />
+<text  x="85.57" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (682 samples, 0.12%)</title><rect x="289.5" y="133" width="1.3" height="15.0" fill="rgb(242,124,36)" rx="2" ry="2" />
+<text  x="292.48" y="143.5" ></text>
+</g>
+<g >
+<title>newencoder.py:35:secret_data_to_bit_array_futhark (166,840 samples, 28.18%)</title><rect x="766.5" y="229" width="332.5" height="15.0" fill="rgb(246,18,41)" rx="2" ry="2" />
+<text  x="769.50" y="239.5" >newencoder.py:35:secret_data_to_bit_array_fu..</text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/attr/converters.py:1:&lt;module&gt; (1,368 samples, 0.23%)</title><rect x="120.8" y="245" width="2.7" height="15.0" fill="rgb(220,33,17)" rx="2" ry="2" />
+<text  x="123.82" y="255.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (2,368 samples, 0.40%)</title><rect x="464.3" y="165" width="4.7" height="15.0" fill="rgb(251,222,10)" rx="2" ry="2" />
+<text  x="467.29" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (3,998 samples, 0.68%)</title><rect x="416.5" y="229" width="7.9" height="15.0" fill="rgb(217,79,27)" rx="2" ry="2" />
+<text  x="419.46" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (670 samples, 0.11%)</title><rect x="252.0" y="181" width="1.3" height="15.0" fill="rgb(244,194,32)" rx="2" ry="2" />
+<text  x="254.95" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (866 samples, 0.15%)</title><rect x="145.8" y="133" width="1.8" height="15.0" fill="rgb(227,14,44)" rx="2" ry="2" />
+<text  x="148.84" y="143.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,231 samples, 0.21%)</title><rect x="563.7" y="149" width="2.5" height="15.0" fill="rgb(215,113,28)" rx="2" ry="2" />
+<text  x="566.73" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/__init__.py:1:&lt;module&gt; (26,860 samples, 4.54%)</title><rect x="126.5" y="245" width="53.5" height="15.0" fill="rgb(247,206,1)" rx="2" ry="2" />
+<text  x="129.52" y="255.5" >/usr/..</text>
+</g>
+<g >
+<title>/usr/lib/python3.10/pickle.py:1:&lt;module&gt; (664 samples, 0.11%)</title><rect x="98.3" y="245" width="1.3" height="15.0" fill="rgb(208,179,43)" rx="2" ry="2" />
+<text  x="101.25" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,830 samples, 0.31%)</title><rect x="263.8" y="165" width="3.6" height="15.0" fill="rgb(250,17,43)" rx="2" ry="2" />
+<text  x="266.77" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,384 samples, 0.23%)</title><rect x="302.6" y="229" width="2.8" height="15.0" fill="rgb(232,3,4)" rx="2" ry="2" />
+<text  x="305.64" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,417 samples, 0.24%)</title><rect x="348.0" y="197" width="2.9" height="15.0" fill="rgb(227,22,36)" rx="2" ry="2" />
+<text  x="351.03" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (2,635 samples, 0.45%)</title><rect x="513.0" y="165" width="5.2" height="15.0" fill="rgb(243,227,44)" rx="2" ry="2" />
+<text  x="515.98" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (751 samples, 0.13%)</title><rect x="399.3" y="149" width="1.5" height="15.0" fill="rgb(253,113,40)" rx="2" ry="2" />
+<text  x="402.28" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,569 samples, 0.26%)</title><rect x="545.2" y="149" width="3.2" height="15.0" fill="rgb(218,214,14)" rx="2" ry="2" />
+<text  x="548.23" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (1,039 samples, 0.18%)</title><rect x="112.9" y="197" width="2.1" height="15.0" fill="rgb(237,194,18)" rx="2" ry="2" />
+<text  x="115.90" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,193 samples, 0.20%)</title><rect x="529.8" y="213" width="2.4" height="15.0" fill="rgb(208,174,6)" rx="2" ry="2" />
+<text  x="532.80" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (854 samples, 0.14%)</title><rect x="503.8" y="197" width="1.7" height="15.0" fill="rgb(245,89,29)" rx="2" ry="2" />
+<text  x="506.79" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,799 samples, 0.30%)</title><rect x="276.1" y="213" width="3.6" height="15.0" fill="rgb(241,161,54)" rx="2" ry="2" />
+<text  x="279.09" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (849 samples, 0.14%)</title><rect x="271.1" y="165" width="1.7" height="15.0" fill="rgb(232,167,24)" rx="2" ry="2" />
+<text  x="274.08" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (301,937 samples, 50.99%)</title><rect x="588.3" y="245" width="601.7" height="15.0" fill="rgb(210,165,54)" rx="2" ry="2" />
+<text  x="591.30" y="255.5" >newencoder.py:1:&lt;module&gt;</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:564:module_from_spec (911 samples, 0.15%)</title><rect x="642.7" y="165" width="1.8" height="15.0" fill="rgb(244,64,39)" rx="2" ry="2" />
+<text  x="645.71" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,246 samples, 0.21%)</title><rect x="1087.8" y="149" width="2.5" height="15.0" fill="rgb(208,57,12)" rx="2" ry="2" />
+<text  x="1090.82" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_compile.py:759:compile (728 samples, 0.12%)</title><rect x="535.8" y="197" width="1.4" height="15.0" fill="rgb(220,33,47)" rx="2" ry="2" />
+<text  x="538.77" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/_wrap.py:20:divide_line (5,614 samples, 0.95%)</title><rect x="620.1" y="133" width="11.2" height="15.0" fill="rgb(223,133,19)" rx="2" ry="2" />
+<text  x="623.08" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (10,113 samples, 1.71%)</title><rect x="637.8" y="197" width="20.1" height="15.0" fill="rgb(226,16,13)" rx="2" ry="2" />
+<text  x="640.79" y="207.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:1137:flush (35,837 samples, 6.05%)</title><rect x="1102.1" y="165" width="71.4" height="15.0" fill="rgb(227,121,1)" rx="2" ry="2" />
+<text  x="1105.08" y="175.5" >/home/ve..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (790 samples, 0.13%)</title><rect x="437.0" y="197" width="1.5" height="15.0" fill="rgb(226,190,33)" rx="2" ry="2" />
+<text  x="439.96" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,253 samples, 0.21%)</title><rect x="532.4" y="213" width="2.5" height="15.0" fill="rgb(229,14,51)" rx="2" ry="2" />
+<text  x="535.40" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (10,179 samples, 1.72%)</title><rect x="64.9" y="229" width="20.3" height="15.0" fill="rgb(213,144,42)" rx="2" ry="2" />
+<text  x="67.89" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (3,592 samples, 0.61%)</title><rect x="397.9" y="213" width="7.1" height="15.0" fill="rgb(235,139,35)" rx="2" ry="2" />
+<text  x="400.86" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:564:module_from_spec (1,477 samples, 0.25%)</title><rect x="469.3" y="181" width="2.9" height="15.0" fill="rgb(221,20,13)" rx="2" ry="2" />
+<text  x="472.29" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (947 samples, 0.16%)</title><rect x="408.8" y="181" width="1.9" height="15.0" fill="rgb(220,217,23)" rx="2" ry="2" />
+<text  x="411.78" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (729 samples, 0.12%)</title><rect x="192.2" y="149" width="1.5" height="15.0" fill="rgb(209,89,31)" rx="2" ry="2" />
+<text  x="195.24" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (892 samples, 0.15%)</title><rect x="470.5" y="149" width="1.7" height="15.0" fill="rgb(208,176,15)" rx="2" ry="2" />
+<text  x="473.46" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (5,086 samples, 0.86%)</title><rect x="333.1" y="213" width="10.2" height="15.0" fill="rgb(229,9,3)" rx="2" ry="2" />
+<text  x="336.14" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (694 samples, 0.12%)</title><rect x="533.5" y="181" width="1.4" height="15.0" fill="rgb(234,205,39)" rx="2" ry="2" />
+<text  x="536.51" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (876 samples, 0.15%)</title><rect x="541.0" y="181" width="1.8" height="15.0" fill="rgb(224,154,24)" rx="2" ry="2" />
+<text  x="544.04" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,136 samples, 0.36%)</title><rect x="253.3" y="197" width="4.2" height="15.0" fill="rgb(209,1,18)" rx="2" ry="2" />
+<text  x="256.29" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (6,277 samples, 1.06%)</title><rect x="70.1" y="197" width="12.5" height="15.0" fill="rgb(244,144,53)" rx="2" ry="2" />
+<text  x="73.06" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (1,812 samples, 0.31%)</title><rect x="276.1" y="229" width="3.6" height="15.0" fill="rgb(242,73,28)" rx="2" ry="2" />
+<text  x="279.07" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/decorator.py:229:fun (1,590 samples, 0.27%)</title><rect x="1092.0" y="165" width="3.2" height="15.0" fill="rgb(232,211,23)" rx="2" ry="2" />
+<text  x="1094.98" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (2,674 samples, 0.45%)</title><rect x="188.4" y="213" width="5.3" height="15.0" fill="rgb(253,79,26)" rx="2" ry="2" />
+<text  x="191.36" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/__init__.py:550:_build_and_catch_errors (1,365 samples, 0.23%)</title><rect x="1083.6" y="165" width="2.8" height="15.0" fill="rgb(248,64,11)" rx="2" ry="2" />
+<text  x="1086.63" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,102 samples, 0.19%)</title><rect x="402.8" y="181" width="2.2" height="15.0" fill="rgb(231,82,21)" rx="2" ry="2" />
+<text  x="405.82" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,581 samples, 0.44%)</title><rect x="138.8" y="101" width="5.1" height="15.0" fill="rgb(205,46,12)" rx="2" ry="2" />
+<text  x="141.79" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,470 samples, 0.25%)</title><rect x="441.2" y="197" width="2.9" height="15.0" fill="rgb(212,36,9)" rx="2" ry="2" />
+<text  x="444.21" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/__init__.py:1:&lt;module&gt; (880 samples, 0.15%)</title><rect x="160.7" y="181" width="1.7" height="15.0" fill="rgb(239,119,49)" rx="2" ry="2" />
+<text  x="163.68" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,261 samples, 0.21%)</title><rect x="288.3" y="181" width="2.5" height="15.0" fill="rgb(212,82,40)" rx="2" ry="2" />
+<text  x="291.33" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,664 samples, 0.28%)</title><rect x="165.8" y="165" width="3.3" height="15.0" fill="rgb(221,36,47)" rx="2" ry="2" />
+<text  x="168.79" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.sum&gt; (273 samples, 0.05%)</title><rect x="630.7" y="37" width="0.6" height="15.0" fill="rgb(254,110,35)" rx="2" ry="2" />
+<text  x="633.72" y="47.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (1,270 samples, 0.21%)</title><rect x="245.9" y="229" width="2.5" height="15.0" fill="rgb(229,228,30)" rx="2" ry="2" />
+<text  x="248.91" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (2,912 samples, 0.49%)</title><rect x="182.4" y="229" width="5.8" height="15.0" fill="rgb(218,168,44)" rx="2" ry="2" />
+<text  x="185.42" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (1,386 samples, 0.23%)</title><rect x="522.1" y="197" width="2.8" height="15.0" fill="rgb(232,185,17)" rx="2" ry="2" />
+<text  x="525.11" y="207.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (812 samples, 0.14%)</title><rect x="546.7" y="133" width="1.7" height="15.0" fill="rgb(245,22,53)" rx="2" ry="2" />
+<text  x="549.73" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pytools/persistent_dict.py:596:__init__ (930 samples, 0.16%)</title><rect x="344.0" y="229" width="1.9" height="15.0" fill="rgb(239,197,23)" rx="2" ry="2" />
+<text  x="347.04" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:140:_path_stat (707 samples, 0.12%)</title><rect x="656.5" y="117" width="1.4" height="15.0" fill="rgb(247,37,2)" rx="2" ry="2" />
+<text  x="659.54" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (3,974 samples, 0.67%)</title><rect x="259.5" y="213" width="7.9" height="15.0" fill="rgb(247,216,32)" rx="2" ry="2" />
+<text  x="262.50" y="223.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:1:&lt;module&gt; (2,569 samples, 0.43%)</title><rect x="59.6" y="245" width="5.1" height="15.0" fill="rgb(233,123,33)" rx="2" ry="2" />
+<text  x="62.61" y="255.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,545 samples, 0.26%)</title><rect x="307.2" y="181" width="3.1" height="15.0" fill="rgb(231,18,43)" rx="2" ry="2" />
+<text  x="310.17" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (779 samples, 0.13%)</title><rect x="108.2" y="165" width="1.5" height="15.0" fill="rgb(206,139,15)" rx="2" ry="2" />
+<text  x="111.18" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (749 samples, 0.13%)</title><rect x="303.9" y="181" width="1.5" height="15.0" fill="rgb(218,1,49)" rx="2" ry="2" />
+<text  x="306.90" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__build_class__&gt; (761 samples, 0.13%)</title><rect x="94.0" y="229" width="1.5" height="15.0" fill="rgb(211,0,41)" rx="2" ry="2" />
+<text  x="96.95" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (2,525 samples, 0.43%)</title><rect x="424.4" y="229" width="5.1" height="15.0" fill="rgb(229,37,15)" rx="2" ry="2" />
+<text  x="427.44" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (847 samples, 0.14%)</title><rect x="121.9" y="197" width="1.6" height="15.0" fill="rgb(219,195,45)" rx="2" ry="2" />
+<text  x="124.86" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_compile.py:759:compile (1,771 samples, 0.30%)</title><rect x="609.1" y="85" width="3.5" height="15.0" fill="rgb(250,114,36)" rx="2" ry="2" />
+<text  x="612.12" y="95.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (72 samples, 0.01%)</title><rect x="385.1" y="149" width="0.2" height="15.0" fill="rgb(237,129,29)" rx="2" ry="2" />
+<text  x="388.15" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/_ratio.py:1:&lt;module&gt; (1,204 samples, 0.20%)</title><rect x="370.5" y="245" width="2.4" height="15.0" fill="rgb(209,128,22)" rx="2" ry="2" />
+<text  x="373.49" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (1,183 samples, 0.20%)</title><rect x="82.8" y="181" width="2.4" height="15.0" fill="rgb(223,174,40)" rx="2" ry="2" />
+<text  x="85.81" y="191.5" ></text>
+</g>
+<g >
+<title>newencoder.py:100:recover_bits (866 samples, 0.15%)</title><rect x="727.2" y="229" width="1.8" height="15.0" fill="rgb(239,78,18)" rx="2" ry="2" />
+<text  x="730.23" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/segment.py:308:adjust_line_length (1,944 samples, 0.33%)</title><rect x="612.8" y="181" width="3.9" height="15.0" fill="rgb(236,60,45)" rx="2" ry="2" />
+<text  x="615.84" y="191.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (779 samples, 0.13%)</title><rect x="354.6" y="133" width="1.6" height="15.0" fill="rgb(246,91,7)" rx="2" ry="2" />
+<text  x="357.64" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,242 samples, 0.21%)</title><rect x="436.1" y="213" width="2.4" height="15.0" fill="rgb(226,226,29)" rx="2" ry="2" />
+<text  x="439.06" y="223.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,433 samples, 0.24%)</title><rect x="315.4" y="133" width="2.8" height="15.0" fill="rgb(236,96,14)" rx="2" ry="2" />
+<text  x="318.37" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (962 samples, 0.16%)</title><rect x="237.8" y="149" width="1.9" height="15.0" fill="rgb(206,39,22)" rx="2" ry="2" />
+<text  x="240.79" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (742 samples, 0.13%)</title><rect x="282.2" y="197" width="1.5" height="15.0" fill="rgb(215,14,46)" rx="2" ry="2" />
+<text  x="285.18" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/re.py:242:finditer (1,909 samples, 0.32%)</title><rect x="608.8" y="117" width="3.8" height="15.0" fill="rgb(233,76,37)" rx="2" ry="2" />
+<text  x="611.85" y="127.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/configparser.py:1:&lt;module&gt; (960 samples, 0.16%)</title><rect x="85.2" y="245" width="1.9" height="15.0" fill="rgb(214,132,48)" rx="2" ry="2" />
+<text  x="88.17" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/fractions.py:1:&lt;module&gt; (971 samples, 0.16%)</title><rect x="87.1" y="245" width="1.9" height="15.0" fill="rgb(244,3,8)" rx="2" ry="2" />
+<text  x="90.09" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (20,808 samples, 3.51%)</title><rect x="673.2" y="197" width="41.4" height="15.0" fill="rgb(228,62,46)" rx="2" ry="2" />
+<text  x="676.16" y="207.5" >&lt;fr..</text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (782 samples, 0.13%)</title><rect x="368.9" y="149" width="1.6" height="15.0" fill="rgb(221,179,25)" rx="2" ry="2" />
+<text  x="371.93" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_dtype.py:103:_scalar_str (1,324 samples, 0.22%)</title><rect x="327.7" y="133" width="2.7" height="15.0" fill="rgb(223,24,21)" rx="2" ry="2" />
+<text  x="330.73" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (1,110 samples, 0.19%)</title><rect x="395.6" y="149" width="2.2" height="15.0" fill="rgb(251,21,23)" rx="2" ry="2" />
+<text  x="398.60" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,099 samples, 0.19%)</title><rect x="410.8" y="229" width="2.2" height="15.0" fill="rgb(208,153,27)" rx="2" ry="2" />
+<text  x="413.81" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,682 samples, 0.45%)</title><rect x="350.9" y="197" width="5.3" height="15.0" fill="rgb(229,110,19)" rx="2" ry="2" />
+<text  x="353.85" y="207.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (674 samples, 0.11%)</title><rect x="243.8" y="149" width="1.3" height="15.0" fill="rgb(250,89,18)" rx="2" ry="2" />
+<text  x="246.80" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/segment.py:261:split_and_crop_lines (2,041 samples, 0.34%)</title><rect x="612.6" y="197" width="4.1" height="15.0" fill="rgb(206,96,7)" rx="2" ry="2" />
+<text  x="615.65" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (2,752 samples, 0.46%)</title><rect x="497.1" y="181" width="5.5" height="15.0" fill="rgb(224,120,11)" rx="2" ry="2" />
+<text  x="500.11" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,280 samples, 0.22%)</title><rect x="441.6" y="181" width="2.5" height="15.0" fill="rgb(228,21,31)" rx="2" ry="2" />
+<text  x="444.59" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (7,769 samples, 1.31%)</title><rect x="306.6" y="213" width="15.5" height="15.0" fill="rgb(230,130,28)" rx="2" ry="2" />
+<text  x="309.64" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,184 samples, 0.20%)</title><rect x="444.3" y="213" width="2.4" height="15.0" fill="rgb(223,56,36)" rx="2" ry="2" />
+<text  x="447.32" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/logging/__init__.py:1:&lt;module&gt; (1,528 samples, 0.26%)</title><rect x="92.4" y="245" width="3.1" height="15.0" fill="rgb(246,195,43)" rx="2" ry="2" />
+<text  x="95.42" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,320 samples, 0.22%)</title><rect x="367.9" y="165" width="2.6" height="15.0" fill="rgb(229,129,54)" rx="2" ry="2" />
+<text  x="370.86" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (7,993 samples, 1.35%)</title><rect x="306.2" y="229" width="15.9" height="15.0" fill="rgb(248,186,5)" rx="2" ry="2" />
+<text  x="309.19" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,010 samples, 0.17%)</title><rect x="586.3" y="213" width="2.0" height="15.0" fill="rgb(210,124,3)" rx="2" ry="2" />
+<text  x="589.29" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1182:exec_module (856 samples, 0.14%)</title><rect x="472.2" y="181" width="1.7" height="15.0" fill="rgb(245,26,27)" rx="2" ry="2" />
+<text  x="475.24" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (687 samples, 0.12%)</title><rect x="560.4" y="181" width="1.4" height="15.0" fill="rgb(214,93,27)" rx="2" ry="2" />
+<text  x="563.44" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/attr/validators.py:1:&lt;module&gt; (1,493 samples, 0.25%)</title><rect x="123.5" y="245" width="3.0" height="15.0" fill="rgb(206,38,33)" rx="2" ry="2" />
+<text  x="126.55" y="255.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (800 samples, 0.14%)</title><rect x="308.7" y="165" width="1.6" height="15.0" fill="rgb(230,50,19)" rx="2" ry="2" />
+<text  x="311.66" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/_idl.py:1:&lt;module&gt; (1,238 samples, 0.21%)</title><rect x="529.7" y="245" width="2.5" height="15.0" fill="rgb(246,12,33)" rx="2" ry="2" />
+<text  x="532.71" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/pretty.py:1:&lt;module&gt; (4,701 samples, 0.79%)</title><rect x="415.1" y="245" width="9.3" height="15.0" fill="rgb(251,159,42)" rx="2" ry="2" />
+<text  x="418.06" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1390:_get_spec (2,725 samples, 0.46%)</title><rect x="497.2" y="165" width="5.4" height="15.0" fill="rgb(247,116,16)" rx="2" ry="2" />
+<text  x="500.17" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (8,537 samples, 1.44%)</title><rect x="474.0" y="165" width="17.1" height="15.0" fill="rgb(207,68,24)" rx="2" ry="2" />
+<text  x="477.04" y="175.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5171:bitpack (742 samples, 0.13%)</title><rect x="1090.3" y="213" width="1.5" height="15.0" fill="rgb(237,176,0)" rx="2" ry="2" />
+<text  x="1093.30" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/multiarray.py:1:&lt;module&gt; (4,754 samples, 0.80%)</title><rect x="235.7" y="245" width="9.4" height="15.0" fill="rgb(233,16,23)" rx="2" ry="2" />
+<text  x="238.67" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_dtype.py:289:_struct_str (2,197 samples, 0.37%)</title><rect x="326.0" y="181" width="4.4" height="15.0" fill="rgb(230,24,14)" rx="2" ry="2" />
+<text  x="328.99" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_add_newdocs_scalars.py:1:&lt;module&gt; (3,765 samples, 0.64%)</title><rect x="226.1" y="245" width="7.6" height="15.0" fill="rgb(219,36,49)" rx="2" ry="2" />
+<text  x="229.15" y="255.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:1151:close (35,893 samples, 6.06%)</title><rect x="1102.0" y="181" width="71.5" height="15.0" fill="rgb(226,144,8)" rx="2" ry="2" />
+<text  x="1104.97" y="191.5" >/home/ve..</text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/_lib/deprecation.py:9:wrap (1,118 samples, 0.19%)</title><rect x="454.8" y="229" width="2.2" height="15.0" fill="rgb(249,55,31)" rx="2" ry="2" />
+<text  x="457.76" y="239.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (160,204 samples, 27.06%)</title><rect x="767.1" y="197" width="319.3" height="15.0" fill="rgb(232,141,0)" rx="2" ry="2" />
+<text  x="770.10" y="207.5" >/mnt/data/School/00-OLD/2020/463_NetSec/pro..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (894 samples, 0.15%)</title><rect x="227.5" y="197" width="1.7" height="15.0" fill="rgb(249,179,29)" rx="2" ry="2" />
+<text  x="230.46" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,176 samples, 0.20%)</title><rect x="180.1" y="229" width="2.3" height="15.0" fill="rgb(227,162,46)" rx="2" ry="2" />
+<text  x="183.05" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (25,742 samples, 4.35%)</title><rect x="128.8" y="213" width="51.2" height="15.0" fill="rgb(244,65,15)" rx="2" ry="2" />
+<text  x="131.75" y="223.5" >&lt;froz..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1527:find_spec (1,523 samples, 0.26%)</title><rect x="654.9" y="133" width="3.0" height="15.0" fill="rgb(235,176,3)" rx="2" ry="2" />
+<text  x="657.91" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_parse.py:493:_parse (736 samples, 0.12%)</title><rect x="100.9" y="149" width="1.5" height="15.0" fill="rgb(212,96,18)" rx="2" ry="2" />
+<text  x="103.94" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/__init__.py:1:&lt;module&gt; (103 samples, 0.02%)</title><rect x="703.0" y="133" width="0.2" height="15.0" fill="rgb(249,221,42)" rx="2" ry="2" />
+<text  x="705.96" y="143.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;method 'extend' of 'list' objects&gt; (10,172 samples, 1.72%)</title><rect x="616.7" y="197" width="20.3" height="15.0" fill="rgb(249,101,7)" rx="2" ry="2" />
+<text  x="619.72" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:950:get_code (779 samples, 0.13%)</title><rect x="518.2" y="165" width="1.6" height="15.0" fill="rgb(221,71,23)" rx="2" ry="2" />
+<text  x="521.23" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,768 samples, 0.47%)</title><rect x="312.7" y="149" width="5.5" height="15.0" fill="rgb(238,98,3)" rx="2" ry="2" />
+<text  x="315.71" y="159.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (337 samples, 0.06%)</title><rect x="687.6" y="149" width="0.7" height="15.0" fill="rgb(225,24,51)" rx="2" ry="2" />
+<text  x="690.63" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1422:find_spec (929 samples, 0.16%)</title><rect x="320.3" y="181" width="1.8" height="15.0" fill="rgb(248,45,14)" rx="2" ry="2" />
+<text  x="323.27" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_internal.py:1:&lt;module&gt; (1,013 samples, 0.17%)</title><rect x="233.7" y="245" width="2.0" height="15.0" fill="rgb(245,207,24)" rx="2" ry="2" />
+<text  x="236.65" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/text.py:1:&lt;module&gt; (2,812 samples, 0.47%)</title><rect x="438.5" y="245" width="5.6" height="15.0" fill="rgb(221,217,6)" rx="2" ry="2" />
+<text  x="441.54" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (774 samples, 0.13%)</title><rect x="1088.8" y="117" width="1.5" height="15.0" fill="rgb(213,4,16)" rx="2" ry="2" />
+<text  x="1091.76" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (4,094 samples, 0.69%)</title><rect x="311.9" y="181" width="8.2" height="15.0" fill="rgb(251,31,51)" rx="2" ry="2" />
+<text  x="314.92" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (697 samples, 0.12%)</title><rect x="267.4" y="229" width="1.4" height="15.0" fill="rgb(237,162,27)" rx="2" ry="2" />
+<text  x="270.42" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (1,003 samples, 0.17%)</title><rect x="195.1" y="197" width="2.0" height="15.0" fill="rgb(227,184,32)" rx="2" ry="2" />
+<text  x="198.10" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (2,737 samples, 0.46%)</title><rect x="188.2" y="229" width="5.5" height="15.0" fill="rgb(227,104,17)" rx="2" ry="2" />
+<text  x="191.24" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,047 samples, 0.18%)</title><rect x="577.7" y="197" width="2.1" height="15.0" fill="rgb(206,160,47)" rx="2" ry="2" />
+<text  x="580.69" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (3,092 samples, 0.52%)</title><rect x="112.4" y="229" width="6.2" height="15.0" fill="rgb(244,164,22)" rx="2" ry="2" />
+<text  x="115.44" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/wavfile.py:1:&lt;module&gt; (2,331 samples, 0.39%)</title><rect x="566.2" y="245" width="4.6" height="15.0" fill="rgb(213,28,16)" rx="2" ry="2" />
+<text  x="569.18" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,211 samples, 0.20%)</title><rect x="444.3" y="229" width="2.4" height="15.0" fill="rgb(217,161,25)" rx="2" ry="2" />
+<text  x="447.27" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,285 samples, 0.22%)</title><rect x="95.7" y="229" width="2.6" height="15.0" fill="rgb(209,30,39)" rx="2" ry="2" />
+<text  x="98.69" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method _imp.create_dynamic&gt; (928 samples, 0.16%)</title><rect x="129.1" y="197" width="1.8" height="15.0" fill="rgb(237,170,44)" rx="2" ry="2" />
+<text  x="132.10" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (950 samples, 0.16%)</title><rect x="182.9" y="165" width="1.9" height="15.0" fill="rgb(211,55,35)" rx="2" ry="2" />
+<text  x="185.91" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (961 samples, 0.16%)</title><rect x="283.7" y="229" width="1.9" height="15.0" fill="rgb(248,187,41)" rx="2" ry="2" />
+<text  x="286.69" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (162 samples, 0.03%)</title><rect x="476.0" y="149" width="0.3" height="15.0" fill="rgb(222,67,6)" rx="2" ry="2" />
+<text  x="478.95" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (4,603 samples, 0.78%)</title><rect x="236.0" y="213" width="9.1" height="15.0" fill="rgb(237,96,19)" rx="2" ry="2" />
+<text  x="238.97" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,754 samples, 0.30%)</title><rect x="306.8" y="197" width="3.5" height="15.0" fill="rgb(223,203,2)" rx="2" ry="2" />
+<text  x="309.76" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,711 samples, 0.29%)</title><rect x="352.8" y="165" width="3.4" height="15.0" fill="rgb(229,30,28)" rx="2" ry="2" />
+<text  x="355.79" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.sum&gt; (1,925 samples, 0.33%)</title><rect x="612.9" y="165" width="3.8" height="15.0" fill="rgb(216,82,38)" rx="2" ry="2" />
+<text  x="615.88" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (2,003 samples, 0.34%)</title><rect x="358.1" y="213" width="4.0" height="15.0" fill="rgb(227,176,36)" rx="2" ry="2" />
+<text  x="361.09" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (4,818 samples, 0.81%)</title><rect x="548.6" y="229" width="9.6" height="15.0" fill="rgb(242,111,48)" rx="2" ry="2" />
+<text  x="551.64" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (672 samples, 0.11%)</title><rect x="579.8" y="213" width="1.4" height="15.0" fill="rgb(208,192,44)" rx="2" ry="2" />
+<text  x="582.84" y="223.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/segment.py:79:cell_length (337 samples, 0.06%)</title><rect x="630.6" y="69" width="0.7" height="15.0" fill="rgb(213,146,0)" rx="2" ry="2" />
+<text  x="633.59" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (2,334 samples, 0.39%)</title><rect x="377.4" y="197" width="4.6" height="15.0" fill="rgb(228,134,9)" rx="2" ry="2" />
+<text  x="380.38" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,142 samples, 0.36%)</title><rect x="449.3" y="197" width="4.3" height="15.0" fill="rgb(224,6,38)" rx="2" ry="2" />
+<text  x="452.32" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (3,617 samples, 0.61%)</title><rect x="397.8" y="229" width="7.2" height="15.0" fill="rgb(254,60,33)" rx="2" ry="2" />
+<text  x="400.81" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (4,817 samples, 0.81%)</title><rect x="346.6" y="229" width="9.6" height="15.0" fill="rgb(221,125,13)" rx="2" ry="2" />
+<text  x="349.60" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (3,736 samples, 0.63%)</title><rect x="250.1" y="213" width="7.4" height="15.0" fill="rgb(229,110,51)" rx="2" ry="2" />
+<text  x="253.10" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.sum&gt; (4,459 samples, 0.75%)</title><rect x="622.4" y="101" width="8.9" height="15.0" fill="rgb(236,58,28)" rx="2" ry="2" />
+<text  x="625.38" y="111.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/wavfile.py:541:read (2,363 samples, 0.40%)</title><rect x="729.0" y="213" width="4.7" height="15.0" fill="rgb(237,83,35)" rx="2" ry="2" />
+<text  x="731.96" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,585 samples, 0.27%)</title><rect x="583.0" y="213" width="3.2" height="15.0" fill="rgb(210,225,9)" rx="2" ry="2" />
+<text  x="586.02" y="223.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:32:get_prefered_context (730 samples, 0.12%)</title><rect x="489.6" y="69" width="1.5" height="15.0" fill="rgb(248,197,30)" rx="2" ry="2" />
+<text  x="492.60" y="79.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (6,699 samples, 1.13%)</title><rect x="508.1" y="229" width="13.4" height="15.0" fill="rgb(241,71,10)" rx="2" ry="2" />
+<text  x="511.14" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/_lib/_pep440.py:1:&lt;module&gt; (1,306 samples, 0.22%)</title><rect x="505.5" y="245" width="2.6" height="15.0" fill="rgb(227,30,0)" rx="2" ry="2" />
+<text  x="508.50" y="255.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (780 samples, 0.13%)</title><rect x="556.7" y="133" width="1.5" height="15.0" fill="rgb(245,178,47)" rx="2" ry="2" />
+<text  x="559.69" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/console.py:1420:_collect_renderables (9,228 samples, 1.56%)</title><rect x="594.3" y="197" width="18.3" height="15.0" fill="rgb(236,101,7)" rx="2" ry="2" />
+<text  x="597.26" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (923 samples, 0.16%)</title><rect x="296.2" y="197" width="1.9" height="15.0" fill="rgb(249,7,42)" rx="2" ry="2" />
+<text  x="299.22" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (858 samples, 0.14%)</title><rect x="519.8" y="197" width="1.7" height="15.0" fill="rgb(223,132,4)" rx="2" ry="2" />
+<text  x="522.78" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/cells.py:26:&lt;genexpr&gt; (2,228 samples, 0.38%)</title><rect x="626.1" y="85" width="4.5" height="15.0" fill="rgb(225,213,54)" rx="2" ry="2" />
+<text  x="629.12" y="95.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/linalg/__init__.py:1:&lt;module&gt; (898 samples, 0.15%)</title><rect x="272.8" y="245" width="1.8" height="15.0" fill="rgb(227,6,31)" rx="2" ry="2" />
+<text  x="275.77" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (2,050 samples, 0.35%)</title><rect x="358.0" y="229" width="4.1" height="15.0" fill="rgb(212,84,3)" rx="2" ry="2" />
+<text  x="361.00" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (2,165 samples, 0.37%)</title><rect x="420.1" y="181" width="4.3" height="15.0" fill="rgb(224,120,0)" rx="2" ry="2" />
+<text  x="423.11" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/ma/__init__.py:1:&lt;module&gt; (1,831 samples, 0.31%)</title><rect x="276.0" y="245" width="3.7" height="15.0" fill="rgb(238,136,36)" rx="2" ry="2" />
+<text  x="279.03" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/__init__.py:532:&lt;lambda&gt; (1,364 samples, 0.23%)</title><rect x="1083.6" y="149" width="2.8" height="15.0" fill="rgb(211,4,23)" rx="2" ry="2" />
+<text  x="1086.63" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,487 samples, 0.42%)</title><rect x="419.5" y="197" width="4.9" height="15.0" fill="rgb(239,145,12)" rx="2" ry="2" />
+<text  x="422.47" y="207.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (745 samples, 0.13%)</title><rect x="247.0" y="197" width="1.4" height="15.0" fill="rgb(248,174,33)" rx="2" ry="2" />
+<text  x="249.96" y="207.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,129 samples, 0.36%)</title><rect x="400.8" y="197" width="4.2" height="15.0" fill="rgb(252,143,48)" rx="2" ry="2" />
+<text  x="403.78" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/numeric.py:1:&lt;module&gt; (1,654 samples, 0.28%)</title><rect x="245.1" y="245" width="3.3" height="15.0" fill="rgb(213,62,7)" rx="2" ry="2" />
+<text  x="248.14" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,363 samples, 0.23%)</title><rect x="120.8" y="229" width="2.7" height="15.0" fill="rgb(234,132,48)" rx="2" ry="2" />
+<text  x="123.83" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (2,227 samples, 0.38%)</title><rect x="351.8" y="181" width="4.4" height="15.0" fill="rgb(212,225,35)" rx="2" ry="2" />
+<text  x="354.76" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (661 samples, 0.11%)</title><rect x="530.9" y="181" width="1.3" height="15.0" fill="rgb(241,4,14)" rx="2" ry="2" />
+<text  x="533.86" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/re.py:197:search (854 samples, 0.14%)</title><rect x="61.3" y="197" width="1.7" height="15.0" fill="rgb(217,6,1)" rx="2" ry="2" />
+<text  x="64.25" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_parse.py:493:_parse (996 samples, 0.17%)</title><rect x="610.7" y="37" width="1.9" height="15.0" fill="rgb(245,209,51)" rx="2" ry="2" />
+<text  x="613.66" y="47.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/re.py:288:_compile (1,362 samples, 0.23%)</title><rect x="99.7" y="213" width="2.7" height="15.0" fill="rgb(235,219,10)" rx="2" ry="2" />
+<text  x="102.70" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (759 samples, 0.13%)</title><rect x="530.7" y="197" width="1.5" height="15.0" fill="rgb(210,88,24)" rx="2" ry="2" />
+<text  x="533.66" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,549 samples, 0.26%)</title><rect x="236.6" y="181" width="3.1" height="15.0" fill="rgb(235,173,53)" rx="2" ry="2" />
+<text  x="239.62" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/attr/_make.py:1:&lt;module&gt; (1,116 samples, 0.19%)</title><rect x="118.6" y="245" width="2.2" height="15.0" fill="rgb(210,219,42)" rx="2" ry="2" />
+<text  x="121.60" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,477 samples, 0.25%)</title><rect x="539.8" y="197" width="3.0" height="15.0" fill="rgb(226,159,27)" rx="2" ry="2" />
+<text  x="542.84" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/__init__.py:1:&lt;module&gt; (26,050 samples, 4.40%)</title><rect x="453.6" y="245" width="51.9" height="15.0" fill="rgb(224,45,52)" rx="2" ry="2" />
+<text  x="456.58" y="255.5" >/usr/..</text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,967 samples, 0.33%)</title><rect x="66.1" y="181" width="4.0" height="15.0" fill="rgb(216,100,27)" rx="2" ry="2" />
+<text  x="69.14" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (950 samples, 0.16%)</title><rect x="231.8" y="149" width="1.9" height="15.0" fill="rgb(251,128,54)" rx="2" ry="2" />
+<text  x="234.76" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/matrixlib/__init__.py:1:&lt;module&gt; (1,195 samples, 0.20%)</title><rect x="281.3" y="245" width="2.4" height="15.0" fill="rgb(239,70,19)" rx="2" ry="2" />
+<text  x="284.27" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:564:module_from_spec (664 samples, 0.11%)</title><rect x="382.9" y="181" width="1.3" height="15.0" fill="rgb(233,125,6)" rx="2" ry="2" />
+<text  x="385.92" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__build_class__&gt; (803 samples, 0.14%)</title><rect x="405.0" y="229" width="1.6" height="15.0" fill="rgb(221,229,12)" rx="2" ry="2" />
+<text  x="408.02" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,505 samples, 0.25%)</title><rect x="353.2" y="149" width="3.0" height="15.0" fill="rgb(223,146,8)" rx="2" ry="2" />
+<text  x="356.20" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/array.py:1400:astype (1,691 samples, 0.29%)</title><rect x="1091.8" y="213" width="3.4" height="15.0" fill="rgb(241,28,7)" rx="2" ry="2" />
+<text  x="1094.78" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (737 samples, 0.12%)</title><rect x="122.1" y="181" width="1.4" height="15.0" fill="rgb(225,181,7)" rx="2" ry="2" />
+<text  x="125.08" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/jupyter.py:1:&lt;module&gt; (1,030 samples, 0.17%)</title><rect x="413.0" y="245" width="2.1" height="15.0" fill="rgb(245,185,48)" rx="2" ry="2" />
+<text  x="416.01" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/lib/__init__.py:1:&lt;module&gt; (4,809 samples, 0.81%)</title><rect x="259.2" y="245" width="9.6" height="15.0" fill="rgb(245,84,37)" rx="2" ry="2" />
+<text  x="262.22" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/cltypes.py:47:_create_vector_types (4,103 samples, 0.69%)</title><rect x="324.7" y="229" width="8.2" height="15.0" fill="rgb(249,38,22)" rx="2" ry="2" />
+<text  x="327.70" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (797 samples, 0.13%)</title><rect x="96.7" y="197" width="1.6" height="15.0" fill="rgb(242,50,14)" rx="2" ry="2" />
+<text  x="99.66" y="207.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method marshal.loads&gt; (1,293 samples, 0.22%)</title><rect x="494.0" y="133" width="2.5" height="15.0" fill="rgb(244,150,53)" rx="2" ry="2" />
+<text  x="496.97" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,628 samples, 0.27%)</title><rect x="165.9" y="149" width="3.2" height="15.0" fill="rgb(250,208,11)" rx="2" ry="2" />
+<text  x="168.86" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/tools.py:1:&lt;module&gt; (5,170 samples, 0.87%)</title><rect x="345.9" y="245" width="10.3" height="15.0" fill="rgb(233,16,52)" rx="2" ry="2" />
+<text  x="348.89" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/elementwise.py:110:get_elwise_kernel_and_types (1,514 samples, 0.26%)</title><rect x="1092.1" y="101" width="3.1" height="15.0" fill="rgb(210,147,9)" rx="2" ry="2" />
+<text  x="1095.13" y="111.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/lib/shape_base.py:1171:tile (1,735 samples, 0.29%)</title><rect x="1095.5" y="181" width="3.5" height="15.0" fill="rgb(220,189,22)" rx="2" ry="2" />
+<text  x="1098.52" y="191.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/sre_parse.py:435:_parse_sub (1,037 samples, 0.18%)</title><rect x="610.6" y="53" width="2.0" height="15.0" fill="rgb(233,48,43)" rx="2" ry="2" />
+<text  x="613.58" y="63.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;method 'repeat' of 'numpy.ndarray' objects&gt; (1,720 samples, 0.29%)</title><rect x="1095.6" y="165" width="3.4" height="15.0" fill="rgb(239,148,36)" rx="2" ry="2" />
+<text  x="1098.55" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (674 samples, 0.11%)</title><rect x="1089.0" y="101" width="1.3" height="15.0" fill="rgb(252,41,28)" rx="2" ry="2" />
+<text  x="1091.96" y="111.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (2,055 samples, 0.35%)</title><rect x="377.9" y="181" width="4.1" height="15.0" fill="rgb(225,49,0)" rx="2" ry="2" />
+<text  x="380.93" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,066 samples, 0.18%)</title><rect x="277.6" y="197" width="2.1" height="15.0" fill="rgb(238,155,12)" rx="2" ry="2" />
+<text  x="280.55" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_dtype.py:34:__str__ (2,298 samples, 0.39%)</title><rect x="325.8" y="197" width="4.6" height="15.0" fill="rgb(227,79,39)" rx="2" ry="2" />
+<text  x="328.78" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (7,403 samples, 1.25%)</title><rect x="132.8" y="181" width="14.8" height="15.0" fill="rgb(212,154,9)" rx="2" ry="2" />
+<text  x="135.82" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,453 samples, 0.25%)</title><rect x="204.7" y="117" width="2.9" height="15.0" fill="rgb(219,54,50)" rx="2" ry="2" />
+<text  x="207.71" y="127.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (1,998 samples, 0.34%)</title><rect x="487.1" y="85" width="4.0" height="15.0" fill="rgb(232,200,18)" rx="2" ry="2" />
+<text  x="490.08" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,271 samples, 0.21%)</title><rect x="436.0" y="229" width="2.5" height="15.0" fill="rgb(215,217,28)" rx="2" ry="2" />
+<text  x="439.00" y="239.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:32:get_prefered_context (58,575 samples, 9.89%)</title><rect x="965.6" y="181" width="116.8" height="15.0" fill="rgb(253,5,44)" rx="2" ry="2" />
+<text  x="968.65" y="191.5" >/mnt/data/Scho..</text>
+</g>
+<g >
+<title>/usr/lib/python3.10/tempfile.py:1:&lt;module&gt; (1,064 samples, 0.18%)</title><rect x="586.2" y="245" width="2.1" height="15.0" fill="rgb(207,226,39)" rx="2" ry="2" />
+<text  x="589.18" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (2,684 samples, 0.45%)</title><rect x="552.9" y="197" width="5.3" height="15.0" fill="rgb(245,33,50)" rx="2" ry="2" />
+<text  x="555.90" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/text.py:621:__rich_console__ (9,813 samples, 1.66%)</title><rect x="617.4" y="165" width="19.6" height="15.0" fill="rgb(251,66,13)" rx="2" ry="2" />
+<text  x="620.43" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (4,549 samples, 0.77%)</title><rect x="136.6" y="149" width="9.1" height="15.0" fill="rgb(225,27,11)" rx="2" ry="2" />
+<text  x="139.60" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:1070:get_data (1,355 samples, 0.23%)</title><rect x="706.3" y="149" width="2.7" height="15.0" fill="rgb(239,217,35)" rx="2" ry="2" />
+<text  x="709.33" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,144 samples, 0.19%)</title><rect x="370.6" y="229" width="2.3" height="15.0" fill="rgb(233,72,0)" rx="2" ry="2" />
+<text  x="373.61" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/text.py:1122:wrap (8,616 samples, 1.46%)</title><rect x="618.1" y="149" width="17.2" height="15.0" fill="rgb(206,114,40)" rx="2" ry="2" />
+<text  x="621.15" y="159.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (859 samples, 0.15%)</title><rect x="78.5" y="85" width="1.7" height="15.0" fill="rgb(245,70,20)" rx="2" ry="2" />
+<text  x="81.50" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:664:_load_unlocked (6,557 samples, 1.11%)</title><rect x="382.0" y="197" width="13.1" height="15.0" fill="rgb(214,111,36)" rx="2" ry="2" />
+<text  x="385.03" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/themes.py:1:&lt;module&gt; (3,465 samples, 0.59%)</title><rect x="446.7" y="245" width="6.9" height="15.0" fill="rgb(239,152,40)" rx="2" ry="2" />
+<text  x="449.68" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (10,335 samples, 1.75%)</title><rect x="377.2" y="213" width="20.6" height="15.0" fill="rgb(235,4,15)" rx="2" ry="2" />
+<text  x="380.22" y="223.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,018 samples, 0.17%)</title><rect x="68.0" y="165" width="2.1" height="15.0" fill="rgb(236,163,35)" rx="2" ry="2" />
+<text  x="71.03" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (1,000 samples, 0.17%)</title><rect x="89.1" y="213" width="2.0" height="15.0" fill="rgb(245,150,32)" rx="2" ry="2" />
+<text  x="92.09" y="223.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (918 samples, 0.16%)</title><rect x="451.8" y="149" width="1.8" height="15.0" fill="rgb(222,20,31)" rx="2" ry="2" />
+<text  x="454.75" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,886 samples, 0.32%)</title><rect x="269.0" y="229" width="3.8" height="15.0" fill="rgb(234,180,33)" rx="2" ry="2" />
+<text  x="272.01" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:987:_find_and_load_unlocked (701 samples, 0.12%)</title><rect x="92.6" y="213" width="1.4" height="15.0" fill="rgb(207,8,10)" rx="2" ry="2" />
+<text  x="95.55" y="223.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (2,932 samples, 0.50%)</title><rect x="364.6" y="229" width="5.9" height="15.0" fill="rgb(252,138,39)" rx="2" ry="2" />
+<text  x="367.64" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/platform.py:1:&lt;module&gt; (3,337 samples, 0.56%)</title><rect x="99.6" y="245" width="6.6" height="15.0" fill="rgb(213,56,10)" rx="2" ry="2" />
+<text  x="102.57" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:921:_find_spec (6,324 samples, 1.07%)</title><rect x="714.6" y="197" width="12.6" height="15.0" fill="rgb(221,116,15)" rx="2" ry="2" />
+<text  x="717.63" y="207.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (837 samples, 0.14%)</title><rect x="238.0" y="133" width="1.7" height="15.0" fill="rgb(209,115,3)" rx="2" ry="2" />
+<text  x="241.04" y="143.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,200 samples, 0.20%)</title><rect x="255.2" y="149" width="2.3" height="15.0" fill="rgb(241,136,22)" rx="2" ry="2" />
+<text  x="258.15" y="159.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/scipy/io/__init__.py:1:&lt;module&gt; (10,844 samples, 1.83%)</title><rect x="508.1" y="245" width="21.6" height="15.0" fill="rgb(247,128,20)" rx="2" ry="2" />
+<text  x="511.10" y="255.5" >/..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (849 samples, 0.14%)</title><rect x="472.3" y="165" width="1.6" height="15.0" fill="rgb(216,137,18)" rx="2" ry="2" />
+<text  x="475.25" y="175.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (3,524 samples, 0.60%)</title><rect x="73.2" y="149" width="7.0" height="15.0" fill="rgb(220,135,6)" rx="2" ry="2" />
+<text  x="76.19" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (1,788 samples, 0.30%)</title><rect x="576.2" y="229" width="3.6" height="15.0" fill="rgb(217,130,2)" rx="2" ry="2" />
+<text  x="579.21" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/scope.py:1:&lt;module&gt; (2,534 samples, 0.43%)</title><rect x="424.4" y="245" width="5.1" height="15.0" fill="rgb(218,191,7)" rx="2" ry="2" />
+<text  x="427.43" y="255.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (673 samples, 0.11%)</title><rect x="206.3" y="85" width="1.3" height="15.0" fill="rgb(227,103,50)" rx="2" ry="2" />
+<text  x="209.27" y="95.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,800 samples, 0.30%)</title><rect x="420.8" y="165" width="3.6" height="15.0" fill="rgb(205,90,7)" rx="2" ry="2" />
+<text  x="423.84" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (4,863 samples, 0.82%)</title><rect x="644.5" y="165" width="9.7" height="15.0" fill="rgb(238,20,17)" rx="2" ry="2" />
+<text  x="647.53" y="175.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (1,412 samples, 0.24%)</title><rect x="242.3" y="181" width="2.8" height="15.0" fill="rgb(235,71,26)" rx="2" ry="2" />
+<text  x="245.33" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (873 samples, 0.15%)</title><rect x="195.4" y="181" width="1.7" height="15.0" fill="rgb(238,123,23)" rx="2" ry="2" />
+<text  x="198.36" y="191.5" ></text>
+</g>
+<g >
+<title>newencoder.py:49:secret_data_to_wav (1,266 samples, 0.21%)</title><rect x="1099.0" y="229" width="2.5" height="15.0" fill="rgb(238,132,19)" rx="2" ry="2" />
+<text  x="1101.98" y="239.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (3,443 samples, 0.58%)</title><rect x="446.7" y="229" width="6.9" height="15.0" fill="rgb(210,151,16)" rx="2" ry="2" />
+<text  x="449.72" y="239.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/overrides.py:1:&lt;module&gt; (3,897 samples, 0.66%)</title><rect x="249.8" y="245" width="7.7" height="15.0" fill="rgb(212,43,39)" rx="2" ry="2" />
+<text  x="252.78" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,231 samples, 0.21%)</title><rect x="191.2" y="165" width="2.5" height="15.0" fill="rgb(208,80,6)" rx="2" ry="2" />
+<text  x="194.24" y="175.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (870 samples, 0.15%)</title><rect x="78.5" y="101" width="1.7" height="15.0" fill="rgb(239,116,5)" rx="2" ry="2" />
+<text  x="81.48" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (696 samples, 0.12%)</title><rect x="238.3" y="117" width="1.4" height="15.0" fill="rgb(224,154,14)" rx="2" ry="2" />
+<text  x="241.32" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (58 samples, 0.01%)</title><rect x="73.1" y="133" width="0.1" height="15.0" fill="rgb(208,63,10)" rx="2" ry="2" />
+<text  x="76.07" y="143.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/cells.py:26:&lt;genexpr&gt; (869 samples, 0.15%)</title><rect x="633.6" y="85" width="1.7" height="15.0" fill="rgb(245,143,16)" rx="2" ry="2" />
+<text  x="636.58" y="95.5" ></text>
+</g>
+<g >
+<title>newencoder.py:1:&lt;module&gt; (8,840 samples, 1.49%)</title><rect x="162.4" y="181" width="17.6" height="15.0" fill="rgb(224,212,48)" rx="2" ry="2" />
+<text  x="165.43" y="191.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.exec&gt; (1,362 samples, 0.23%)</title><rect x="638.8" y="165" width="2.7" height="15.0" fill="rgb(209,193,50)" rx="2" ry="2" />
+<text  x="641.77" y="175.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (22,887 samples, 3.87%)</title><rect x="457.0" y="229" width="45.6" height="15.0" fill="rgb(247,117,53)" rx="2" ry="2" />
+<text  x="459.99" y="239.5" >&lt;fro..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,481 samples, 0.25%)</title><rect x="190.7" y="181" width="3.0" height="15.0" fill="rgb(228,33,10)" rx="2" ry="2" />
+<text  x="193.74" y="191.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:693:__exit__ (35,894 samples, 6.06%)</title><rect x="1102.0" y="197" width="71.5" height="15.0" fill="rgb(223,194,19)" rx="2" ry="2" />
+<text  x="1104.96" y="207.5" >/home/ve..</text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (5,213 samples, 0.88%)</title><rect x="72.2" y="181" width="10.4" height="15.0" fill="rgb(222,75,37)" rx="2" ry="2" />
+<text  x="75.18" y="191.5" ></text>
+</g>
+<g >
+<title>all (592,133 samples, 100%)</title><rect x="10.0" y="277" width="1180.0" height="15.0" fill="rgb(228,92,34)" rx="2" ry="2" />
+<text  x="13.00" y="287.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/cache.py:466:create_built_program_from_source_cached (1,363 samples, 0.23%)</title><rect x="1083.6" y="133" width="2.8" height="15.0" fill="rgb(237,38,17)" rx="2" ry="2" />
+<text  x="1086.64" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,419 samples, 0.24%)</title><rect x="550.1" y="197" width="2.8" height="15.0" fill="rgb(251,177,3)" rx="2" ry="2" />
+<text  x="553.07" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/pyopencl/elementwise.py:167:get_elwise_kernel (1,517 samples, 0.26%)</title><rect x="1092.1" y="117" width="3.1" height="15.0" fill="rgb(209,55,27)" rx="2" ry="2" />
+<text  x="1095.13" y="127.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,538 samples, 0.26%)</title><rect x="334.4" y="197" width="3.1" height="15.0" fill="rgb(252,14,48)" rx="2" ry="2" />
+<text  x="337.42" y="207.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/rich/segment.py:1:&lt;module&gt; (917 samples, 0.15%)</title><rect x="429.5" y="245" width="1.8" height="15.0" fill="rgb(214,120,38)" rx="2" ry="2" />
+<text  x="432.48" y="255.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/version.py:1:&lt;module&gt; (1,396 samples, 0.24%)</title><rect x="302.6" y="245" width="2.8" height="15.0" fill="rgb(205,157,8)" rx="2" ry="2" />
+<text  x="305.61" y="255.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (1,367 samples, 0.23%)</title><rect x="426.8" y="181" width="2.7" height="15.0" fill="rgb(239,7,20)" rx="2" ry="2" />
+<text  x="429.75" y="191.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap_external&gt;:877:exec_module (3,769 samples, 0.64%)</title><rect x="138.2" y="133" width="7.5" height="15.0" fill="rgb(248,58,19)" rx="2" ry="2" />
+<text  x="141.15" y="143.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:5079:__init__ (683 samples, 0.12%)</title><rect x="316.9" y="101" width="1.3" height="15.0" fill="rgb(235,34,4)" rx="2" ry="2" />
+<text  x="319.86" y="111.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1053:_handle_fromlist (1,454 samples, 0.25%)</title><rect x="502.6" y="229" width="2.9" height="15.0" fill="rgb(218,99,53)" rx="2" ry="2" />
+<text  x="505.60" y="239.5" ></text>
+</g>
+<g >
+<title>/home/vega/.local/lib/python3.10/site-packages/soundfile.py:943:write (8,283 samples, 1.40%)</title><rect x="1173.5" y="197" width="16.5" height="15.0" fill="rgb(240,35,10)" rx="2" ry="2" />
+<text  x="1176.49" y="207.5" ></text>
+</g>
+<g >
+<title>/mnt/data/School/00-OLD/2020/463_NetSec/project/bitpack.py:80:initialise_opencl_object (4,165 samples, 0.70%)</title><rect x="169.4" y="133" width="8.3" height="15.0" fill="rgb(219,157,33)" rx="2" ry="2" />
+<text  x="172.45" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:233:_call_with_frames_removed (1,654 samples, 0.28%)</title><rect x="299.3" y="165" width="3.3" height="15.0" fill="rgb(225,17,22)" rx="2" ry="2" />
+<text  x="302.32" y="175.5" ></text>
+</g>
+<g >
+<title>/usr/lib/python3.10/site-packages/numpy/core/_dtype.py:68:_construction_repr (1,432 samples, 0.24%)</title><rect x="327.5" y="149" width="2.9" height="15.0" fill="rgb(215,81,46)" rx="2" ry="2" />
+<text  x="330.51" y="159.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,282 samples, 0.22%)</title><rect x="532.3" y="229" width="2.6" height="15.0" fill="rgb(235,93,46)" rx="2" ry="2" />
+<text  x="535.34" y="239.5" ></text>
+</g>
+<g >
+<title>~:0:&lt;built-in method builtins.__import__&gt; (100 samples, 0.02%)</title><rect x="645.8" y="133" width="0.2" height="15.0" fill="rgb(231,155,27)" rx="2" ry="2" />
+<text  x="648.77" y="143.5" ></text>
+</g>
+<g >
+<title>&lt;frozen importlib._bootstrap&gt;:1022:_find_and_load (1,220 samples, 0.21%)</title><rect x="529.7" y="229" width="2.5" height="15.0" fill="rgb(249,229,48)" rx="2" ry="2" />
+<text  x="532.74" y="239.5" ></text>
+</g>
+</g>
+</svg>

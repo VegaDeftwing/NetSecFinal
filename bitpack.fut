@@ -26,7 +26,7 @@ def rep4 [n] (data: [n]i64): []i64 = map (\i -> data[i/4]) (0..<n*4)
 -- 100 = 0x64 = 01 10 01 00 = (flipped) 0 1 2 1
 -- -> [1,0,2,1, 2,0,2,1, 3,0,2,1, 0,1,2,1]
 
-def main [n] (data: []i64): []i64 = gettop(shiftbits((rep4 data) 2 )2)
-
-
-
+def bitpack [n] (data: [n]i64): []i64 =
+    let data2 = rep4 data
+    let data3 = shiftbits data2 2
+    in gettop data3 2
